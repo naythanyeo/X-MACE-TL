@@ -105,7 +105,7 @@ def run(args: argparse.Namespace) -> None:
                 device=args.device,
                 default_dtype=args.default_dtype,
             )
-            model_foundation = calc.models[0]
+            model_foundation = calc.model
         elif args.foundation_model in ["small_off", "medium_off", "large_off"]:
             model_type = args.foundation_model.split("_")[0]
             logging.info(
@@ -123,7 +123,11 @@ def run(args: argparse.Namespace) -> None:
             logging.info(
                 f"Using foundation model {args.foundation_model} as initial checkpoint."
             )
+        #args.r_max = model_foundation.r_max.item()
         args.r_max = model_foundation.r_max.item()
+        if model_foundation.radial_embedding.bessel_fn.__class__.__name__ == "BesselBasis":
+            args.num_radial_basis = model_foundation.radial_embedding.bessel_fn.bessel_weights.numel()
+        args.num_cutoff_basis = int(model_foundation.radial_embedding.cutoff_fn.p.item())
 
     if args.statistics_file is not None:
         with open(args.statistics_file, "r") as f:  # pylint: disable=W1514
@@ -259,7 +263,7 @@ def run(args: argparse.Namespace) -> None:
         valid_set = data.dataset_from_sharded_hdf5(
             args.valid_file, r_max=args.r_max, z_table=z_table
         )
-    
+
     train_sampler, valid_sampler = None, None
     if args.distributed:
         train_sampler = torch.utils.data.distributed.DistributedSampler(
@@ -317,7 +321,7 @@ def run(args: argparse.Namespace) -> None:
             nacs_weight = args.nacs_weight,
             socs_weight = args.socs_weight
         )
-    
+
     if args.compute_avg_num_neighbors:
         avg_num_neighbors = modules.compute_avg_num_neighbors(train_loader)
         if args.distributed:
@@ -431,6 +435,11 @@ def run(args: argparse.Namespace) -> None:
 
     model: torch.nn.Module
 
+    if args.foundation_model is not None:
+        interaction_first_name = model_foundation.interactions[0].__class__.__name__
+    else:
+        interaction_first_name = args.interaction_first
+
     if args.model == "ExcitedMACE":
         model = modules.ExcitedMACE(
             **model_config,
@@ -439,9 +448,7 @@ def run(args: argparse.Namespace) -> None:
             distance_transform=args.distance_transform,
             correlation=args.correlation,
             gate=modules.gate_dict[args.gate],
-            interaction_cls_first=modules.interaction_classes[
-                "RealAgnosticInteractionBlock"
-            ],
+            interaction_cls_first=modules.interaction_classes[interaction_first_name],
             MLP_irreps=o3.Irreps(args.MLP_irreps),
             radial_MLP=ast.literal_eval(args.radial_MLP),
             radial_type=args.radial_type,
@@ -450,7 +457,7 @@ def run(args: argparse.Namespace) -> None:
             soc_num=args.soc_num,
             nac_num=args.nac_num,
         )
-    
+
     elif args.model == "AutoencoderExcitedMACE":
         model = modules.AutoencoderExcitedMACE(
             **model_config,
@@ -460,9 +467,7 @@ def run(args: argparse.Namespace) -> None:
             distance_transform=args.distance_transform,
             correlation=args.correlation,
             gate=modules.gate_dict[args.gate],
-            interaction_cls_first=modules.interaction_classes[
-                "RealAgnosticInteractionBlock"
-            ],
+            interaction_cls_first=modules.interaction_classes[interaction_first_name],
             MLP_irreps=o3.Irreps(args.MLP_irreps),
             radial_MLP=ast.literal_eval(args.radial_MLP),
             radial_type=args.radial_type,
@@ -473,7 +478,7 @@ def run(args: argparse.Namespace) -> None:
         )
     else:
         raise RuntimeError(f"Unknown model: '{args.model}'")
-    
+
     if args.foundation_model is not None:
         model = load_foundations(
             model,
@@ -482,7 +487,7 @@ def run(args: argparse.Namespace) -> None:
             load_readout=True,
             max_L=args.max_L,
         )
-        
+
     print(model)
     model.to(device)
 
@@ -584,7 +589,7 @@ def run(args: argparse.Namespace) -> None:
             lr=args.lr,
             amsgrad=args.amsgrad,
             betas=(args.beta, 0.999),
-        )    
+        )
 
     optimizer: torch.optim.Optimizer
     if args.optimizer == "adamw":
@@ -821,35 +826,35 @@ def run(args: argparse.Namespace) -> None:
         for param in model.parameters():
             param.requires_grad = False
 
-        # table_train_valid = create_error_table(
-        #     table_type=args.error_table,
-        #     all_data_loaders=train_valid_data_loader,
-        #     model_type=args.model,
-        #     model=model_to_evaluate,
-        #     loss_fn=loss_fn,
-        #     output_args=output_args,
-        #     log_wandb=args.wandb,
-        #     device=device,
-        #     distributed=args.distributed,
-        # )
-        # logging.info("Error-table on TRAIN and VALID:\n" + str(table_train_valid))
+        table_train_valid = create_error_table(
+            table_type=args.error_table,
+            all_data_loaders=train_valid_data_loader,
+            model_type=args.model,
+            model=model_to_evaluate,
+            loss_fn=loss_fn,
+            output_args=output_args,
+            log_wandb=args.wandb,
+            device=device,
+            distributed=args.distributed,
+        )
+        logging.info("Error-table on TRAIN and VALID:\n" + str(table_train_valid))
 
-        # if test_data_loader:
-        #     table_test = create_error_table(
-        #         table_type=args.error_table,
-        #         all_data_loaders=test_data_loader,
-        #         model_type=args.model,
-        #         model=model_to_evaluate,
-        #         loss_fn=loss_fn,
-        #         output_args=output_args,
-        #         log_wandb=args.wandb,
-        #         device=device,
-        #         distributed=args.distributed,
-        #     )
-        #     logging.info("Error-table on TEST:\n" + str(table_test))
+        if test_data_loader:
+            table_test = create_error_table(
+                 table_type=args.error_table,
+                 all_data_loaders=test_data_loader,
+                 model_type=args.model,
+                 model=model_to_evaluate,
+                 loss_fn=loss_fn,
+                 output_args=output_args,
+                 log_wandb=args.wandb,
+                 device=device,
+                 distributed=args.distributed,
+             )
+            logging.info("Error-table on TEST:\n" + str(table_test))
 
         if rank == 0:
-            # Save entire model
+                # Save entire model
             if swa_eval:
                 model_path = Path(args.checkpoints_dir) / (tag + "_stagetwo.model")
             else:

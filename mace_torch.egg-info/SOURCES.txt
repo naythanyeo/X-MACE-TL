@@ -56,6 +56,7 @@ mace_torch.egg-info/dependency_links.txt
 mace_torch.egg-info/entry_points.txt
 mace_torch.egg-info/requires.txt
 mace_torch.egg-info/top_level.txt
+scripts/SHARC_MACE.py
 scripts/__init__.py
 scripts/eval_configs.py
 scripts/preprocess_data.py
