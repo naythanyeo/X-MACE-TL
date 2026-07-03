@@ -44,3 +44,8 @@ wandb/
 # Generated plotting/cache outputs
 matplotlib_cache/
 *loss_curve.png
+
+# Generated tutorial outputs
+nicer_tutorials/_outputs/
+nicer_tutorials/**/trial_run_output/
+nicer_tutorials/**/transfer_learning_output/
