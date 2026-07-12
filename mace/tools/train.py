@@ -367,12 +367,10 @@ def take_step(
         compute_stress=output_args["stress"],
     )
 
-    if model_type == "AutoencoderExcitedMACE":
-        centred_energy = (batch["energy"] - output["e0s"] - output["pair_energy"]).unsqueeze(-1)
-        encoded_energy = model.perm_encoder(centred_energy)
-        decoded_energy = model.perm_decoder(encoded_energy) + output["e0s"] + output["pair_energy"]
-        output["encoded_energy"] = encoded_energy
-        output["decoded_energy"] = decoded_energy
+    base_model = model.module if hasattr(model, "module") else model
+    prepare_outputs = getattr(base_model, "prepare_loss_outputs", None)
+    if prepare_outputs is not None:
+        output = prepare_outputs(batch_dict, output)
 
     loss = loss_fn(pred=output, ref=batch)
     loss.backward()
@@ -399,10 +397,13 @@ def evaluate(
     device: torch.device,
     model_type: str,
 ) -> Tuple[float, Dict[str, Any]]:
+    requires_grad = [param.requires_grad for param in model.parameters()]
     for param in model.parameters():
         param.requires_grad = False
 
     metrics = MACELoss(loss_fn=loss_fn).to(device)
+    base_model = model.module if hasattr(model, "module") else model
+    prepare_outputs = getattr(base_model, "prepare_loss_outputs", None)
 
     start_time = time.time()
     for batch in data_loader:
@@ -416,11 +417,8 @@ def evaluate(
             compute_stress=output_args["stress"],
         )
 
-        if model_type == "AutoencoderExcitedMACE":
-            encoded_energy = model.perm_encoder(batch["energy"].unsqueeze(-1))
-            decoded_energy = model.perm_decoder(encoded_energy)
-            output["encoded_energy"] = encoded_energy
-            output["decoded_energy"] = decoded_energy
+        if prepare_outputs is not None:
+            output = prepare_outputs(batch_dict, output)
 
         avg_loss, aux = metrics(batch, output)
 
@@ -428,8 +426,8 @@ def evaluate(
     aux["time"] = time.time() - start_time
     metrics.reset()
 
-    for param in model.parameters():
-        param.requires_grad = True
+    for param, original_requires_grad in zip(model.parameters(), requires_grad):
+        param.requires_grad = original_requires_grad
 
     return avg_loss, aux
 

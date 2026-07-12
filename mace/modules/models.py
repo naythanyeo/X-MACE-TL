@@ -894,6 +894,27 @@ class AutoencoderExcitedMACE(torch.nn.Module):
 
             self.invariant_readouts.append(NonLinearReadoutBlock(hidden_irreps_out, MLP_irreps, gate, num_permutational_invariant, compute_nacs=False, nac_indices=0))
 
+    def prepare_loss_outputs(
+        self,
+        batch: Dict[str, torch.Tensor],
+        output: Dict[str, Optional[torch.Tensor]],
+    ) -> Dict[str, Optional[torch.Tensor]]:
+        """
+        Hook function to get the autoencoder outputs from the data 
+        Called during training and validation, but not inference 
+        """
+        centred_energy = (
+            batch["energy"] - output["e0s"] - output["pair_energy"]
+        ).unsqueeze(-1)
+        encoded_energy = self.perm_encoder(centred_energy)
+
+        output = output.copy()
+        output["encoded_energy"] = encoded_energy
+        output["decoded_energy"] = (
+            self.perm_decoder(encoded_energy) + output["e0s"] + output["pair_energy"]
+        )
+        return output
+
     def forward(
         self,
         data: Dict[str, torch.Tensor],
