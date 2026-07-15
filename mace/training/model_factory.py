@@ -1,64 +1,138 @@
 """
 Model factory helper function to initialise model from default parameters
-Use two types of presets, either the default from x-mace CLI, or a lightweight
-version that can be used for testing. 
+Currently has 3 different presets, either the default from x-mace CLI, 
+the default that the ANI model uses, or a lightweight version suitable for
+testing on local devices
+
 Alternative, the presets can be mmanually overwritten when it is called. 
 
 AtomDataMetadata is expected when initialising the model. 
 Get the metadata object from builder.metadata
 """
 
+from pathlib import Path
 from typing import List, Optional, Union
 
+import torch
 from e3nn import o3
 
 from mace import modules
 from mace.data.atom_data_loader import AtomDataMetadata
+from mace.tools.finetuning_utils import load_foundations
 
-"""
-Pre-defined model presets that match the X-Mace CLI
-"""
-_AUTOENCODER_PRESETS = {
-    "default": {
-        "latent_dim": 16,
-        "num_bessel": 8,
-        "num_polynomial_cutoff": 5,
-        "max_ell": 3,
-        "num_interactions": 2,
-        "hidden_irreps": "128x0e + 128x1o",
-        "mlp_irreps": "16x0e",
-        "correlation": 3,
-        "gate": "silu",
-        "interaction": "RealAgnosticResidualInteractionBlock",
-        "interaction_first": "RealAgnosticResidualInteractionBlock",
-        "radial_mlp": [64, 64, 64],
-        "radial_type": "bessel",
-        "distance_transform": "None",
-        "pair_repulsion": False,
-    },
-    "lightweight": {
-        "latent_dim": 16,
-        "num_bessel": 4,
-        "num_polynomial_cutoff": 3,
-        "max_ell": 2,
-        "num_interactions": 1,
-        "hidden_irreps": "4x0e + 4x1o",
-        "mlp_irreps": "16x0e",
-        "correlation": 1,
-        "gate": "silu",
-        "interaction": "RealAgnosticResidualInteractionBlock",
-        "interaction_first": "RealAgnosticResidualInteractionBlock",
-        "radial_mlp": [32, 32],
-        "radial_type": "bessel",
-        "distance_transform": "None",
-        "pair_repulsion": False,
-    },
+from .model_presets import AUTOENCODER_PRESETS
+
+
+FOUNDATION_MODEL_DIR = (
+    Path(__file__).resolve().parents[1] / "calculators" / "foundations_models"
+)
+FOUNDATION_MODELS = {
+    "ani500k": FOUNDATION_MODEL_DIR / "ani500k_large_CC.model",
+    "mace_mp": FOUNDATION_MODEL_DIR / "2023-12-03-mace-mp.model",
 }
+
+
+def _load_foundation_model(from_model: Union[str, Path]) -> torch.nn.Module:
+    """
+    Load the foundation model from the repo
+    Either Anic or macemp 
+    """
+    if not isinstance(from_model, (str, Path)):
+        raise TypeError("from_model must be 'ani500k', 'mace_mp', or a model path.")
+
+    model_path = FOUNDATION_MODELS.get(from_model, Path(from_model).expanduser())
+    if not model_path.is_file():
+        raise FileNotFoundError(f"Foundation model not found: {model_path}")
+
+    model = torch.load(model_path, map_location="cpu", weights_only=False)
+
+    if not isinstance(model, torch.nn.Module):
+        raise TypeError("The foundation checkpoint must contain a torch.nn.Module.")
+    return model
+
+
+def _backbone_parameters(model: torch.nn.Module) -> dict:
+    """
+    Extract foundation parameters using the model factory argument names.
+    """
+    radial_types = {
+        "BesselBasis": "bessel",
+        "GaussianBasis": "gaussian",
+        "ChebychevBasis": "chebyshev",
+    }
+    distance_transforms = {
+        "AgnesiTransform": "Agnesi",
+        "SoftTransform": "Soft",
+    }
+    interactions = list(model.interactions)
+    products = list(model.products)
+    radial_name = model.radial_embedding.bessel_fn.__class__.__name__
+    distance_name = (
+        model.radial_embedding.distance_transform.__class__.__name__
+        if hasattr(model.radial_embedding, "distance_transform")
+        else "None"
+    )
+    correlations = [
+        len(product.symmetric_contractions.contractions[0].weights) + 1
+        for product in products
+    ]
+    radial_mlps = [list(block.conv_tp_weights.hs[1:-1]) for block in interactions]
+
+    return {
+        "r_max": float(model.r_max.item()),
+        "radial_type": radial_types.get(radial_name, radial_name),
+        "num_bessel": int(model.radial_embedding.out_dim),
+        "num_polynomial_cutoff": int(model.radial_embedding.cutoff_fn.p.item()),
+        "distance_transform": distance_transforms.get(distance_name, distance_name),
+        "max_ell": int(model.spherical_harmonics._lmax),
+        "hidden_irreps": str(products[0].linear.irreps_out),
+        "num_interactions": len(interactions),
+        "interaction": interactions[-1].__class__.__name__,
+        "interaction_first": interactions[0].__class__.__name__,
+        "correlation": correlations[0] if len(set(correlations)) == 1 else correlations,
+        "radial_mlp": (
+            radial_mlps[0]
+            if all(value == radial_mlps[0] for value in radial_mlps)
+            else radial_mlps
+        ),
+    }
+
+
+def _validate_parameters(
+    model: torch.nn.Module,
+    foundation_model: torch.nn.Module,
+    z_table,
+) -> None:
+    """Check that the target and foundation backbones are compatible."""
+    model_parameters = _backbone_parameters(model)
+    foundation_parameters = _backbone_parameters(foundation_model)
+    mismatches = []
+
+    for (key, model_value), (_, foundation_value) in zip(
+        model_parameters.items(), foundation_parameters.items()
+    ):
+        if model_value != foundation_value:
+            mismatches.append(
+                f"{key}={foundation_value!r} is required; got {model_value!r}."
+            )
+
+    foundation_elements = {int(z) for z in foundation_model.atomic_numbers}
+    unsupported_elements = [
+        int(z) for z in z_table.zs if int(z) not in foundation_elements
+    ]
+    if unsupported_elements:
+        mismatches.append(
+            f"atomic_numbers must be a subset of {sorted(foundation_elements)}; "
+            f"got unsupported elements {unsupported_elements}."
+        )
+
+    if mismatches:
+        raise ValueError("Foundation model parameters do not match:\n" + "\n".join(mismatches))
 
 
 def initialise_autoencoder(
     metadata: AtomDataMetadata,
-    preset: str = "default",
+    preset: str = "default_ani",
     latent_dim: Optional[int] = None,
     num_bessel: Optional[int] = None,
     num_polynomial_cutoff: Optional[int] = None,
@@ -74,15 +148,16 @@ def initialise_autoencoder(
     radial_type: Optional[str] = None,
     distance_transform: Optional[str] = None,
     pair_repulsion: Optional[bool] = None,
+    from_model: Optional[Union[str, Path]] = None,
 ) -> modules.AutoencoderExcitedMACE:
     # Verify that preset selected is available 
     # Currently only default or lightweight
-    if preset not in _AUTOENCODER_PRESETS:
-        valid_presets = ", ".join(_AUTOENCODER_PRESETS)
+    if preset not in AUTOENCODER_PRESETS:
+        valid_presets = ", ".join(AUTOENCODER_PRESETS)
         raise ValueError(f"Unknown preset '{preset}'. Choose from: {valid_presets}.")
 
     # Use the default preset settings
-    settings = _AUTOENCODER_PRESETS[preset].copy()
+    settings = AUTOENCODER_PRESETS[preset].copy()
     overrides = {
         "latent_dim": latent_dim,
         "num_bessel": num_bessel,
@@ -107,7 +182,7 @@ def initialise_autoencoder(
     )
 
     # Apart from preset settings, also use the info from metadata to define model
-    return modules.AutoencoderExcitedMACE(
+    model = modules.AutoencoderExcitedMACE(
         r_max=metadata.r_max,
         num_bessel=settings["num_bessel"],
         num_polynomial_cutoff=settings["num_polynomial_cutoff"],
@@ -136,3 +211,30 @@ def initialise_autoencoder(
         radial_MLP=settings["radial_mlp"],
         radial_type=settings["radial_type"],
     )
+
+    if from_model is not None:
+        foundation_model = _load_foundation_model(from_model)
+        _validate_parameters(
+            model=model,
+            foundation_model=foundation_model,
+            z_table=metadata.z_table,
+        )
+
+        foundation_parameter = next(foundation_model.parameters())
+        model = model.to(
+            device=foundation_parameter.device,
+            dtype=foundation_parameter.dtype,
+        )
+        max_L = o3.Irreps(settings["hidden_irreps"]).lmax
+
+        model = load_foundations(
+            model=model,
+            model_foundations=foundation_model,
+            table=metadata.z_table,
+            load_readout=False,
+            use_shift=False,
+            use_scale=True,
+            max_L=max_L,
+        )
+
+    return model
