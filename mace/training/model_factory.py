@@ -32,22 +32,17 @@ FOUNDATION_MODELS = {
 }
 
 
-def _load_foundation_model(from_model: Union[str, Path]) -> torch.nn.Module:
-    """
-    Load the foundation model from the repo
-    Either Anic or macemp 
-    """
-    if not isinstance(from_model, (str, Path)):
-        raise TypeError("from_model must be 'ani500k', 'mace_mp', or a model path.")
+def _load_base_model(load_base: str) -> torch.nn.Module:
+    """Load one of the bundled base models."""
+    if not isinstance(load_base, str) or load_base not in FOUNDATION_MODELS:
+        raise ValueError("load_base must be 'ani500k' or 'mace_mp'.")
 
-    model_path = FOUNDATION_MODELS.get(from_model, Path(from_model).expanduser())
+    model_path = FOUNDATION_MODELS[load_base]
     if not model_path.is_file():
         raise FileNotFoundError(f"Foundation model not found: {model_path}")
 
     model = torch.load(model_path, map_location="cpu", weights_only=False)
 
-    if not isinstance(model, torch.nn.Module):
-        raise TypeError("The foundation checkpoint must contain a torch.nn.Module.")
     return model
 
 
@@ -100,14 +95,15 @@ def _backbone_parameters(model: torch.nn.Module) -> dict:
 
 def _validate_parameters(
     model: torch.nn.Module,
-    foundation_model: torch.nn.Module,
+    base_model: torch.nn.Module,
     z_table,
 ) -> None:
-    """Check that the target and foundation backbones are compatible."""
+    """Check that the target and base-model backbones are compatible."""
     model_parameters = _backbone_parameters(model)
-    foundation_parameters = _backbone_parameters(foundation_model)
+    foundation_parameters = _backbone_parameters(base_model)
     mismatches = []
 
+    # Check the architecture parameters
     for (key, model_value), (_, foundation_value) in zip(
         model_parameters.items(), foundation_parameters.items()
     ):
@@ -116,7 +112,8 @@ def _validate_parameters(
                 f"{key}={foundation_value!r} is required; got {model_value!r}."
             )
 
-    foundation_elements = {int(z) for z in foundation_model.atomic_numbers}
+    # Check for the atoms support
+    foundation_elements = {int(z) for z in base_model.atomic_numbers}
     unsupported_elements = [
         int(z) for z in z_table.zs if int(z) not in foundation_elements
     ]
@@ -127,7 +124,7 @@ def _validate_parameters(
         )
 
     if mismatches:
-        raise ValueError("Foundation model parameters do not match:\n" + "\n".join(mismatches))
+        raise ValueError("Base model parameters do not match:\n" + "\n".join(mismatches))
 
 
 def initialise_autoencoder(
@@ -148,7 +145,7 @@ def initialise_autoencoder(
     radial_type: Optional[str] = None,
     distance_transform: Optional[str] = None,
     pair_repulsion: Optional[bool] = None,
-    from_model: Optional[Union[str, Path]] = None,
+    load_base: Optional[str] = None,
 ) -> modules.AutoencoderExcitedMACE:
     # Verify that preset selected is available 
     # Currently only default or lightweight
@@ -212,15 +209,15 @@ def initialise_autoencoder(
         radial_type=settings["radial_type"],
     )
 
-    if from_model is not None:
-        foundation_model = _load_foundation_model(from_model)
+    if load_base is not None:
+        base_model = _load_base_model(load_base)
         _validate_parameters(
             model=model,
-            foundation_model=foundation_model,
+            base_model=base_model,
             z_table=metadata.z_table,
         )
 
-        foundation_parameter = next(foundation_model.parameters())
+        foundation_parameter = next(base_model.parameters())
         model = model.to(
             device=foundation_parameter.device,
             dtype=foundation_parameter.dtype,
@@ -229,7 +226,7 @@ def initialise_autoencoder(
 
         model = load_foundations(
             model=model,
-            model_foundations=foundation_model,
+            model_foundations=base_model,
             table=metadata.z_table,
             load_readout=False,
             use_shift=False,
