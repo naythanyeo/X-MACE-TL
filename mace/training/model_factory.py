@@ -27,7 +27,7 @@ FOUNDATION_MODEL_DIR = (
     Path(__file__).resolve().parents[1] / "calculators" / "foundations_models"
 )
 FOUNDATION_MODELS = {
-    "ani500k": FOUNDATION_MODEL_DIR / "ani500k_large_CC.model",
+    "ani500k": FOUNDATION_MODEL_DIR / "ani500k_large_CC_cpu.model",
     "mace_mp": FOUNDATION_MODEL_DIR / "2023-12-03-mace-mp.model",
 }
 
