@@ -49,7 +49,7 @@ class SharcCalculator:
         self.soc_idx = np.triu_indices(self.n_total_states, 1)
         self.n_atoms = len(atom_types)
 
-        self.calc = MACECalculator(model_path=model_path, n_energies=self.n_total_states, device=device)
+        self.calc = MACECalculator(model_paths=model_path, n_energies=self.n_total_states, device=device)
 
     def calculate(
         self, sharc_coords: Union[np.ndarray, torch.Tensor]
@@ -88,8 +88,8 @@ class SharcCalculator:
         # Reshape force array from [atoms, states, coords] to [states, atoms, coords]
         qm_out["grad"] = np.einsum("ijk->jik", -mace_output["forces"]).tolist()
 
-        if self.nac_key in self.properties:
-            nacs_v = np.einsum("ijk->jik", mace_output[self.nac_key])
+        if "nac" in self.properties:
+            nacs_v = np.einsum("ijk->jik", mace_output["nac"])
             nacs_m = np.zeros((states, states, self.n_atoms, 3))
 
             if n_triplets == 0:
