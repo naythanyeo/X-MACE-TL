@@ -1,2 +1,2 @@
 #!/bin/bash
-$SHARC/driver.py -i mace input
+"$SHARC/driver.py" -i MACE input
