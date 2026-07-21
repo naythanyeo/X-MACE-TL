@@ -1,0 +1,7 @@
+model_file ../../model.pt
+properties energy forces
+energy_unit eV
+distance_unit Ang
+cutoff 5.0
+device cpu
+paddingstates False
