@@ -3,20 +3,20 @@ veloc        zero
 nstates      3
 charge       0
 actstates    3
-state        3 mch
+state        2 mch
 coeff        auto
 rngseed      26933
 ezero        0.0
 tmax         10.0
 stepsize     0.5
 nsubsteps    25
-surf         sharc
-coupling     overlap
+surf         none # Add back after nacs
+coupling     none # Add back after NACs are in
 nogradcorrect
 ekincorrect  parallel_vel
 decoherence_scheme edc
 decoherence_param 0.1
 grad_select
-nac_select
+# nac_select
 eselect      0.5
 output_format ascii
