@@ -1,18 +1,15 @@
 geomfile     "geom"
 veloc        zero
-
 nstates      3
 charge       0
 actstates    3
 state        3 mch
 coeff        auto
 rngseed      26933
-
 ezero        0.0
 tmax         10.0
 stepsize     0.5
 nsubsteps    25
-
 surf         sharc
 coupling     overlap
 nogradcorrect
