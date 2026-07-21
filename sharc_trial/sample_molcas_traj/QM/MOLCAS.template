@@ -1,0 +1,74 @@
+## This is a commented version of the ADF.template file 
+    ## for version 4.0 of the SHARC_MOLCAS.py interface.
+
+    ## ======== BASIS SETS ============
+
+    ## Basis set for all atoms
+basis cc-pvdz
+
+    ## Location of basis set library (use to create custom basis libs in home dir)
+baslib /home/varain/sharc/build/basis_library
+
+
+    ## ======== CASSCF settings ============
+    ## RASSCF is not possible with the interface
+
+    ## Number of active electrons
+nactel 2
+
+    ## Number of active orbitals
+ras2 2
+
+    ## Number of doubly occupied orbitals
+inactive 7
+
+    ## Number of averaged states for each multiplicity
+roots 3
+
+
+    ## Convergence thresholds in RASSCF 
+    ## see Molcas keyword THRS for details
+rasscf_thrs           1e-8 1e-4 1e-4
+
+    ## Number of iterations
+    ## First argument is used for the SCF iterations
+    ## Second (optional) argument is used for the Super-CI iterations
+    ## Defaults are 200 100
+iterations               200 100
+
+    ## ======== METHOD settings ============
+
+    ## Method to be used.
+    ## can be "casscf", "caspt2", "ms-caspt2", "xms-caspt2", "cms-pdft", default "casscf"
+method casscf
+
+    ## Sets the IPEA shift for CASPT2, default 0.25
+#ipea 0.00
+
+    ## Choose between "CORT" or "DORT" (see OpenMolcas manual)
+    ## only relevant for CASPT2 gradients with IPEA shift
+#cort_or_dort cort
+
+    ## Sets the imaginary level shift for CASPT2, default 0.0
+#imaginary 0.0
+
+    ## Sets the number of frozen core orbitals for CASPT2.
+    ## Default is -1, which lets MOLCAS decide automatically.
+#frozen 1
+
+    ## Cholesky decomposition accuracy
+    ## see CDTHreshold in &GATEWAY
+cholesky_accu 1e-4
+
+
+
+    ## if present, activates PCM (leads to numerical gradients in all cases)
+    ## first argument is the solvent (see list in MOLCAS manual), second is AARE, third is R-MIN
+# pcmset water 0.4 1.0
+    ## state used for the steady-state PCM calculation, "1 1" is S0
+# pcmstate 1 1
+
+
+# Gradient accuracy settings
+#gradaccudefault 1.e-04
+#gradaccumax     1.e-02

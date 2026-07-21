@@ -1,0 +1,43 @@
+printlevel 2
+
+geomfile     "geom"
+veloc        zero
+
+nstates      3
+actstates    3
+charge       0
+state        2 mch
+coeff        auto
+rngseed      26933
+
+ezero        -77.93
+tmax         10.0
+stepsize     0.5
+nsubsteps    25
+
+method       tsh
+surf         diagonal
+
+# Approximate time-derivative couplings from energy curvature.
+# Later, when reliable NACs are available, use: coupling nacdr
+coupling     ktdc
+ktdc_method  energy
+
+# Avoid requesting NACs for gradient transformation.
+# Later, with NACs, replace this with: gradcorrect ngt
+nogradcorrect
+
+hopping_procedure sharc
+ekincorrect  parallel_vel
+reflect_frustrated none
+
+decoherence_scheme edc
+decoherence_param 0.1
+
+grad_all
+# Later, with NACs, nac_select can be enabled to reduce NAC calculations.
+
+nospinorbit
+
+output_format ascii
+output_dat_steps 1

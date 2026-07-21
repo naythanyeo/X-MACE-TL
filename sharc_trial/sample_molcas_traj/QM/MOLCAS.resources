@@ -1,0 +1,8 @@
+molcas /home/varain/sharc/build
+
+scratchdir /home/varain/sharc/molcas_scratch/WORK
+savedir /home/varain/sharc/molcas_scratch/SAVE
+
+memory 2000
+ncpu 4
+delay 0.0
