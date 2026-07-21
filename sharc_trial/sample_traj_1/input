@@ -1,6 +1,5 @@
 geomfile     "geom"
 veloc        zero
-# velocfile    "veloc"
 
 nstates      3
 charge       0
