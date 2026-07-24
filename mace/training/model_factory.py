@@ -33,13 +33,16 @@ FOUNDATION_MODELS = {
 
 
 def _load_base_model(load_base: str) -> torch.nn.Module:
-    """Load one of the bundled base models."""
-    if not isinstance(load_base, str) or load_base not in FOUNDATION_MODELS:
-        raise ValueError("load_base must be 'ani500k' or 'mace_mp'.")
-
-    model_path = FOUNDATION_MODELS[load_base]
+    """
+    Load one of the bundled base models.
+    load_base is either a keyword ani500k/mace_mp or a file path 
+    """
+    if load_base in FOUNDATION_MODELS.keys():
+        model_path = FOUNDATION_MODELS[load_base]
+    else:
+        model_path = Path(load_base)
     if not model_path.is_file():
-        raise FileNotFoundError(f"Foundation model not found: {model_path}")
+        raise FileNotFoundError(f"Foundation model not found: {model_path}.")
 
     model = torch.load(model_path, map_location="cpu", weights_only=False)
 
