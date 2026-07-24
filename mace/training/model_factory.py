@@ -220,10 +220,11 @@ def initialise_autoencoder(
             z_table=metadata.z_table,
         )
 
-        foundation_parameter = next(base_model.parameters())
-        model = model.to(
-            device=foundation_parameter.device,
-            dtype=foundation_parameter.dtype,
+        # Shift base model to match device and dtype of model
+        model_parameter = next(model.parameters())
+        base_model = base_model.to(
+            device=model_parameter.device,
+            dtype=model_parameter.dtype,
         )
         max_L = o3.Irreps(settings["hidden_irreps"]).lmax
 
