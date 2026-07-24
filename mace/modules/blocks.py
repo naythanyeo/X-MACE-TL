@@ -51,18 +51,19 @@ class PermutationInvariantDecoder(torch.nn.Module):
         z = self.decoder_nn(z)
 
         # Construct matrices from the decoder's output
-        matrices = []
-        for i in range(z.size(0)):
-            diag_vals = z[i][:self.n_energies]
-            offdiag_vals = z[i][self.n_energies:]
-            matrix = torch.diag(diag_vals) + torch.diag(offdiag_vals, 1) + torch.diag(offdiag_vals, -1)
-            matrices.append(matrix)
+        # Replaced python loop with torch diag_embed
+        diag_vals = z[:, :self.n_energies]
+        offdiag_vals = z[:, self.n_energies:]
+        matrices = (
+            torch.diag_embed(diag_vals) +
+            torch.diag_embed(offdiag_vals, offset=1) +
+            torch.diag_embed(offdiag_vals, offset=-1)
+        )
 
-        # Stack matrices and compute eigenvalues
-        matrices = torch.stack(matrices, dim=0)
-        roots, _ = torch.linalg.eig(matrices)
-        roots = roots.real
-        roots, _ = torch.sort(roots, dim=-1)
+        # Compute roots with eigvalsh instead of eig since this
+        # matrices are hermitian
+        # Returns sorted and real roots by default 
+        roots = torch.linalg.eigvalsh(matrices)
 
         return roots
 
