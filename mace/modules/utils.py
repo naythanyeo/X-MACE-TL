@@ -26,17 +26,23 @@ def compute_forces(
     grad_outputs: List[Optional[torch.Tensor]] = [torch.ones_like(energy[:,0])]
     excited_gradients = []
     for j, state in enumerate(range(energy.shape[-1])):
+        # If training mode always require energy graph
+        # If valid or test, can release the graph after since 
+        # force derivative graph is not needed
         if j < energy.shape[-1] - 1 or training:
-            retain = True
+            retain_energy_graph = True
         else:
-            retain == False
+            retain_energy_graph = False
+        # Only create new force graph for training runs 
+        # Validation wont need new second derivative forces
+        create_force_graph = training
 
         gradient = torch.autograd.grad(
             outputs=[energy[:,state]],  # [n_graphs, ]
             inputs=[positions],  # [n_nodes, 3]
             grad_outputs=grad_outputs,
-            retain_graph=retain,  # Make sure the graph is not destroyed during training
-            create_graph=retain,  # Create graph for second derivative
+            retain_graph=retain_energy_graph,  # Make sure the graph is not destroyed during training
+            create_graph=create_force_graph,  # Create graph for second derivative
             allow_unused=True,  # For complete dissociation turn to true
         )[
         0
