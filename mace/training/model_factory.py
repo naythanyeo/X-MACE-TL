@@ -220,11 +220,17 @@ def initialise_autoencoder(
             z_table=metadata.z_table,
         )
 
-        # Shift base model to match device and dtype of model
-        model_parameter = next(model.parameters())
-        base_model = base_model.to(
-            device=model_parameter.device,
-            dtype=model_parameter.dtype,
+        # Shift model dtype to match dtype of foundation model first
+        # Higher precision when loading in parameters
+        # But save the original models device and dtype to convert back
+        og_model_paramter = next(model.parameters())
+        og_device = og_model_paramter.device
+        og_dtype = og_model_paramter.dtype
+        
+        base_model_parameter = next(base_model.parameters())
+        model = model.to(
+            device=base_model_parameter.device,
+            dtype=base_model_parameter.dtype,
         )
         max_L = o3.Irreps(settings["hidden_irreps"]).lmax
 
@@ -237,5 +243,8 @@ def initialise_autoencoder(
             use_scale=True,
             max_L=max_L,
         )
-
+        model = model.to(
+            device=og_device,
+            dtype=og_dtype
+        )
     return model
