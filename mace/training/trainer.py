@@ -2,9 +2,11 @@
 
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import Optional, Union
+from typing import Callable, Optional, Union
 
 import torch
+from sklearn.model_selection import KFold
+from torch.utils.data import Subset
 
 from mace.tools.torch_geometric import DataLoader
 
@@ -18,7 +20,7 @@ class Trainer:
     """
     max_epochs: int = 2048
     early_stopping: bool = True
-    patience: int = 50
+    patience: int = 15
     restore_best: bool = True
     max_grad_norm: Optional[float] = 10.0
     device: Union[str, torch.device] = "cpu"
@@ -48,23 +50,33 @@ class Trainer:
         """
         model.to(self.device)
 
-        history = {"epoch": [], "train_loss": [], "valid_loss": []}
+        history = {
+            "epoch": [],
+            "train_loss": [],
+            "valid_loss": [],
+            "valid_energy_mae": [],
+            "valid_force_mae": [],
+        }
         best_state = None
         best_epoch = 0
         best_valid_loss = float("inf")
         patience_counter = 0
 
         for epoch in range(1, self.max_epochs + 1):
-            train_loss = self._run_epoch(
+            train_metrics = self._run_epoch(
                 model, train_loader, optimizer, loss_fn, training=True
             )
-            valid_loss = self._run_epoch(
-                model, valid_loader, optimizer, loss_fn, training=False
+            valid_metrics = self._run_epoch(
+                model, valid_loader, optimizer, loss_fn, training=False, test=True
             )
+            train_loss = train_metrics["loss"]
+            valid_loss = valid_metrics["loss"]
 
             history["epoch"].append(epoch)
             history["train_loss"].append(train_loss)
             history["valid_loss"].append(valid_loss)
+            history["valid_energy_mae"].append(valid_metrics["energy_mae"])
+            history["valid_force_mae"].append(valid_metrics["force_mae"])
 
             # Now settle the early stopping logic 
             # If the validation loss doesnt decrease, add to counter
@@ -81,7 +93,9 @@ class Trainer:
             if self.verbose:
                 print(
                     f"Epoch {epoch:03d} | train_loss={train_loss:.6f} | "
-                    f"valid_loss={valid_loss:.6f}"
+                    f"valid_loss={valid_loss:.6f} | "
+                    f"energy_mae={valid_metrics['energy_mae']:.6f} | "
+                    f"force_mae={valid_metrics['force_mae']:.6f}"
                 )
 
             # Only break if early stopping is true
@@ -98,6 +112,113 @@ class Trainer:
 
         return model, history
 
+    def train_k_fold_models(
+        self,
+        model: torch.nn.Module,
+        data_loader: DataLoader,
+        optimizer_factory: Callable[[torch.nn.Module], torch.optim.Optimizer],
+        loss_fn: torch.nn.Module,
+        k: int = 5,
+        seed: int = 42,
+    ):
+        """
+        Train k independent model copies using k-fold cross-validation.
+        Records also the mean and variances of all of the k folds
+        """
+        dataset_size = len(data_loader.dataset)
+        if not 2 <= k <= dataset_size:
+            raise ValueError("k must be between 2 and the dataset size.")
+
+        model_template = deepcopy(model).cpu()
+        fold_loaders = self._build_fold_loaders(data_loader, k, seed)
+        models = {}
+        full_history = {}
+
+        for fold, (train_loader, valid_loader) in enumerate(fold_loaders, start=1):
+            if self.verbose:
+                print(f"Fold {fold}/{k}")
+
+            fold_model = deepcopy(model_template).to(self.device)
+            fold_optimizer = optimizer_factory(fold_model)
+            fold_model, fold_history = self.train_model(
+                fold_model,
+                train_loader,
+                valid_loader,
+                fold_optimizer,
+                loss_fn,
+            )
+
+            model_key = f"model_{fold}"
+            models[model_key] = fold_model.cpu()
+            full_history[model_key] = fold_history
+
+        full_history["combined"] = self._combine_fold_histories(full_history)
+
+        return models, full_history
+
+    @staticmethod
+    def _combine_fold_histories(full_history):
+        """
+        For each fold, record the various properties then take the mean and variance 
+        Output into one combined dictionary 
+        """
+
+        fold_values = {
+            "best_epoch": [],
+            "valid_loss": [],
+            "valid_energy_mae": [],
+            "valid_force_mae": [],
+        }
+
+        for history in full_history.values():
+            best_epoch = history["best_epoch"]
+            best_index = best_epoch - 1
+            fold_values["best_epoch"].append(best_epoch)
+            fold_values["valid_loss"].append(history["valid_loss"][best_index])
+            fold_values["valid_energy_mae"].append(
+                history["valid_energy_mae"][best_index]
+            )
+            fold_values["valid_force_mae"].append(
+                history["valid_force_mae"][best_index]
+            )
+
+        combined = {}
+        for metric, values in fold_values.items():
+            values = torch.tensor(values, dtype=torch.float64)
+            combined[metric] = (
+                torch.mean(values).item(),
+                torch.var(values, unbiased=False).item(),
+            )
+
+        return combined
+
+    @staticmethod
+    def _build_fold_loaders(data_loader: DataLoader, k: int, seed: int):
+        """
+        Use SK-LEARN to build k fold loaders 
+        """
+        splitter = KFold(n_splits=k, shuffle=True, random_state=seed)
+        loader_pairs = []
+        for fold, (train_indices, valid_indices) in enumerate(
+            splitter.split(range(len(data_loader.dataset)))
+        ):
+            train_loader = DataLoader(
+                Subset(data_loader.dataset, train_indices.tolist()),
+                batch_size=data_loader.batch_size,
+                shuffle=True,
+                drop_last=False,
+                generator=torch.Generator().manual_seed(seed + fold),
+            )
+            valid_loader = DataLoader(
+                Subset(data_loader.dataset, valid_indices.tolist()),
+                batch_size=data_loader.batch_size,
+                shuffle=False,
+                drop_last=False,
+            )
+            loader_pairs.append((train_loader, valid_loader))
+
+        return loader_pairs
+
     def _run_epoch(
         self,
         model: torch.nn.Module,
@@ -105,10 +226,15 @@ class Trainer:
         optimizer: torch.optim.Optimizer,
         loss_fn: torch.nn.Module,
         training: bool, # Training vs Validation Mode
-    ) -> float:
+        test: bool = False,
+    ) -> dict:
         model.train(training)
         total_loss = 0.0
         num_batches = 0
+        energy_absolute_error = None
+        force_absolute_error = None
+        energy_count = 0
+        force_count = 0
 
         base_model = model.module if hasattr(model, "module") else model
         prepare_outputs = getattr(base_model, "prepare_loss_outputs", None)
@@ -142,6 +268,26 @@ class Trainer:
 
             loss = loss_fn(pred=output, ref=batch)
 
+            if test:
+                """
+                Include test mode to record and store the MAE for energies and forces
+                Test is only called during the validation steps
+                """
+                energy_error = torch.abs(output["energy"] - batch["energy"])
+                force_error = torch.abs(output["forces"] - batch["forces"])
+                batch_energy_error = energy_error.detach().sum()
+                batch_force_error = force_error.detach().sum()
+
+                if energy_absolute_error is None:
+                    energy_absolute_error = batch_energy_error
+                    force_absolute_error = batch_force_error
+                else:
+                    energy_absolute_error += batch_energy_error
+                    force_absolute_error += batch_force_error
+
+                energy_count += energy_error.numel()
+                force_count += force_error.numel()
+
             if training:
                 loss.backward()
                 # Gradient clipping 
@@ -154,4 +300,12 @@ class Trainer:
             total_loss += loss.detach().item()
             num_batches += 1
 
-        return total_loss / num_batches
+        if num_batches == 0:
+            raise ValueError("DataLoader is empty.")
+
+        metrics = {"loss": total_loss / num_batches}
+        if test:
+            metrics["energy_mae"] = energy_absolute_error.item() / energy_count
+            metrics["force_mae"] = force_absolute_error.item() / force_count
+
+        return metrics
