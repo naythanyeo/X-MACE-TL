@@ -2,7 +2,7 @@
 
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import Callable, Optional, Union
+from typing import Optional, Union
 
 import torch
 from sklearn.model_selection import KFold
@@ -116,7 +116,7 @@ class Trainer:
         self,
         model: torch.nn.Module,
         data_loader: DataLoader,
-        optimizer_factory: Callable[[torch.nn.Module], torch.optim.Optimizer],
+        optimizer: torch.optim.Optimizer,
         loss_fn: torch.nn.Module,
         k: int = 5,
         seed: int = 42,
@@ -129,7 +129,6 @@ class Trainer:
         if not 2 <= k <= dataset_size:
             raise ValueError("k must be between 2 and the dataset size.")
 
-        model_template = deepcopy(model).cpu()
         fold_loaders = self._build_fold_loaders(data_loader, k, seed)
         models = {}
         full_history = {}
@@ -137,9 +136,9 @@ class Trainer:
         for fold, (train_loader, valid_loader) in enumerate(fold_loaders, start=1):
             if self.verbose:
                 print(f"Fold {fold}/{k}")
-
-            fold_model = deepcopy(model_template).to(self.device)
-            fold_optimizer = optimizer_factory(fold_model)
+            # Create a copy of the model to train
+            fold_model = deepcopy(model).to(self.device)
+            fold_optimizer = self._build_fold_optimizer(optimizer, fold_model)
             fold_model, fold_history = self.train_model(
                 fold_model,
                 train_loader,
@@ -155,6 +154,15 @@ class Trainer:
         full_history["combined"] = self._combine_fold_histories(full_history)
 
         return models, full_history
+
+    @staticmethod
+    def _build_fold_optimizer(optimizer, fold_model):
+        trainable_parameters = (
+            parameter
+            for parameter in fold_model.parameters()
+            if parameter.requires_grad
+        )
+        return type(optimizer)(trainable_parameters, **optimizer.defaults)
 
     @staticmethod
     def _combine_fold_histories(full_history):
