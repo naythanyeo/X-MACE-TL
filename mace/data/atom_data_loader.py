@@ -109,7 +109,7 @@ class AtomDataLoaderBuilder:
     def load(
         self,
         atoms,
-        batch_size: int = 1,
+        batch_size: int = 10,
         shuffle: bool = False,
         drop_last: bool = False,
     ) -> DataLoader:

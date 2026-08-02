@@ -26,8 +26,7 @@ class Trainer:
     lr_factor and scheduler_patience are for the ReduceLROnPlateau scheduler
     Scheduler is defined before the epoch loop in train_model 
 
-    EMA is disabled by default. Set ema_decay to enable it for validation and
-    best-model restoration.
+    EMA is default enabled to be 0.99 (as per their github)
     """
     max_epochs: int = 100
     early_stopping: bool = True

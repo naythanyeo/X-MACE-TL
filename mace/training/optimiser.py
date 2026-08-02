@@ -14,7 +14,7 @@ import torch
 
 def build_optimiser(
     model: torch.nn.Module,
-    lr: float = 1e-4,
+    lr: float = 1e-3,
     weight_decay: float = 5e-7,
 ) -> torch.optim.Adam:
 
