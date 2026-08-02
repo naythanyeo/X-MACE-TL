@@ -10,7 +10,7 @@ import torch
 
 from mace.tools.torch_geometric import DataLoader
 
-from .metrics import mean_absolute_error, root_mean_squared_error
+from .metrics import mean_absolute_error
 
 
 @dataclass
@@ -52,15 +52,23 @@ class Tester:
         self.ref_forces = torch.cat(ref_forces).numpy()
 
         return self.pred_energies, self.pred_forces
-
+    """
+    Energies: (N_geoms, N_states)
+    Forces: (N_geoms, N_states, 3N_atoms)    
+    For energy and force MAE by states, averaging is done along the other axes
+    """
     def get_energy_mae(self) -> float:
         return float(mean_absolute_error(self.pred_energies, self.ref_energies))
 
-    def get_energy_rmse(self) -> float:
-        return float(root_mean_squared_error(self.pred_energies, self.ref_energies))
+    def get_energy_mae_by_state(self) -> np.ndarray:
+        return mean_absolute_error(
+            self.pred_energies, self.ref_energies, axis=0
+        )
 
     def get_force_mae(self) -> float:
         return float(mean_absolute_error(self.pred_forces, self.ref_forces))
 
-    def get_force_rmse(self) -> float:
-        return float(root_mean_squared_error(self.pred_forces, self.ref_forces))
+    def get_force_mae_by_state(self) -> np.ndarray:
+        return mean_absolute_error(
+            self.pred_forces, self.ref_forces, axis=(0, 2)
+        )
