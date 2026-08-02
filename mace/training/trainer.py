@@ -6,6 +6,7 @@ from typing import Optional, Union
 
 import torch
 from sklearn.model_selection import KFold
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.utils.data import Subset
 
 from mace.tools.torch_geometric import DataLoader
@@ -14,17 +15,20 @@ from mace.tools.torch_geometric import DataLoader
 @dataclass
 class Trainer:
     """
-    General Trainer class that mostly follows the CLI default parameters 
-    Only patience here set to 50 with an early stopping boolean 
-    Originally patience is set to 2048 (no early stopping)
+    General Trainer class that mostly follows the CLI default parameters
+
+    lr_factor and scheduler_patience are for the ReduceLROnPlateau scheduler
+    Scheduler is defined before the epoch loop in train_model 
     """
     max_epochs: int = 2048
     early_stopping: bool = True
-    patience: int = 15
+    patience: int = 2048
     restore_best: bool = True
     max_grad_norm: Optional[float] = 10.0
     device: Union[str, torch.device] = "cpu"
     verbose: bool = True
+    lr_factor: float = 0.8
+    scheduler_patience: int = 50
 
     def __post_init__(self) -> None:
         if self.max_epochs < 1:
@@ -32,7 +36,11 @@ class Trainer:
         if self.early_stopping and self.patience < 1:
             raise ValueError(
                 "patience must be at least 1 when early stopping is enabled."
-            )
+        )
+        if not 0.0 < self.lr_factor < 1.0:
+            raise ValueError("lr_factor must be between 0 and 1.")
+        if self.scheduler_patience < 0:
+            raise ValueError("scheduler_patience must be non-negative.")
 
         self.device = torch.device(self.device)
 
@@ -49,6 +57,11 @@ class Trainer:
         or restoring the previous states. 
         """
         model.to(self.device)
+        scheduler = ReduceLROnPlateau(
+            optimizer,
+            factor=self.lr_factor,
+            patience=self.scheduler_patience,
+        )
 
         history = {
             "epoch": [],
@@ -56,6 +69,7 @@ class Trainer:
             "valid_loss": [],
             "valid_energy_mae": [],
             "valid_force_mae": [],
+            "learning_rate": [],
         }
         best_state = None
         best_epoch = 0
@@ -63,6 +77,7 @@ class Trainer:
         patience_counter = 0
 
         for epoch in range(1, self.max_epochs + 1):
+            current_lr = optimizer.param_groups[0]["lr"]
             train_metrics = self._run_epoch(
                 model, train_loader, optimizer, loss_fn, training=True
             )
@@ -77,6 +92,10 @@ class Trainer:
             history["valid_loss"].append(valid_loss)
             history["valid_energy_mae"].append(valid_metrics["energy_mae"])
             history["valid_force_mae"].append(valid_metrics["force_mae"])
+            history["learning_rate"].append(current_lr)
+
+            # Update the optimiser learning rate for the next epoch
+            scheduler.step(valid_loss)
 
             # Now settle the early stopping logic 
             # If the validation loss doesnt decrease, add to counter
@@ -95,7 +114,8 @@ class Trainer:
                     f"Epoch {epoch:03d} | train_loss={train_loss:.6f} | "
                     f"valid_loss={valid_loss:.6f} | "
                     f"energy_mae={valid_metrics['energy_mae']:.6f} | "
-                    f"force_mae={valid_metrics['force_mae']:.6f}"
+                    f"force_mae={valid_metrics['force_mae']:.6f} | "
+                    f"lr={current_lr:.2e}"
                 )
 
             # Only break if early stopping is true
