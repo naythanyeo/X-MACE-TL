@@ -13,6 +13,8 @@ from torch_ema import ExponentialMovingAverage
 
 from mace.tools.torch_geometric import DataLoader
 
+from .optimiser import build_optimiser
+
 
 @dataclass
 class Trainer:
@@ -21,37 +23,48 @@ class Trainer:
 
     Early stopping is implemented but by default CLI doesnt use it, and instead relies
     on LR reduction (patience 50) and max epoch 100 by default. If want to toggle manual
-    early stopping, set early_stopping to True and set patience to value less than max_epochs
+    early stopping, set early_stopping to True and set stopping_patience to a value less
+    than max_epochs.
 
-    lr_factor and scheduler_patience are for the ReduceLROnPlateau scheduler
-    Scheduler is defined before the epoch loop in train_model 
+    scheduler_lr_factor and scheduler_patience are for the ReduceLROnPlateau scheduler.
+    The optimiser and scheduler are defined before the epoch loop in train_model.
 
     EMA is default enabled to be 0.99 (as per their github)
     """
     max_epochs: int = 100
-    early_stopping: bool = True
-    patience: int = 2048
-    restore_best: bool = True
-    max_grad_norm: Optional[float] = 10.0
     device: Union[str, torch.device] = "cpu"
     verbose: bool = True
-    lr_factor: float = 0.8
+
+    optimiser_lr: float = 1e-3
+    optimiser_weight_decay: float = 5e-7
+    max_grad_norm: Optional[float] = 10.0
+
+    scheduler_lr_factor: float = 0.8
     scheduler_patience: int = 50
+
     ema_decay: Optional[float] = 0.99
+
+    early_stopping: bool = True
+    stopping_patience: int = 2048
+    restore_best: bool = True
 
     def __post_init__(self) -> None:
         if self.max_epochs < 1:
             raise ValueError("max_epochs must be at least 1.")
-        if self.early_stopping and self.patience < 1:
-            raise ValueError(
-                "patience must be at least 1 when early stopping is enabled."
-        )
-        if not 0.0 < self.lr_factor < 1.0:
-            raise ValueError("lr_factor must be between 0 and 1.")
+        if self.optimiser_lr <= 0.0:
+            raise ValueError("optimiser_lr must be positive.")
+        if self.optimiser_weight_decay < 0.0:
+            raise ValueError("optimiser_weight_decay must be non-negative.")
+        if not 0.0 < self.scheduler_lr_factor < 1.0:
+            raise ValueError("scheduler_lr_factor must be between 0 and 1.")
         if self.scheduler_patience < 0:
             raise ValueError("scheduler_patience must be non-negative.")
         if self.ema_decay is not None and not 0.0 < self.ema_decay < 1.0:
             raise ValueError("ema_decay must be between 0 and 1, or None.")
+        if self.early_stopping and self.stopping_patience < 1:
+            raise ValueError(
+                "stopping_patience must be at least 1 when early stopping is enabled."
+            )
 
         self.device = torch.device(self.device)
 
@@ -60,8 +73,7 @@ class Trainer:
         model: torch.nn.Module,
         train_loader: DataLoader,
         valid_loader: DataLoader,
-        optimizer: torch.optim.Optimizer,
-        loss_fn: torch.nn.Module,
+        loss_fn: torch.nn.Module
     ):
         """
         Main trainer loop that controls the overall training like early stopping
@@ -71,10 +83,15 @@ class Trainer:
         For ema, the validation context is defined and used during validation mode
         """
         model.to(self.device)
+        optimiser = build_optimiser(
+            model,
+            lr=self.optimiser_lr,
+            weight_decay=self.optimiser_weight_decay
+        )
         scheduler = ReduceLROnPlateau(
-            optimizer,
-            factor=self.lr_factor,
-            patience=self.scheduler_patience,
+            optimiser,
+            factor=self.scheduler_lr_factor,
+            patience=self.scheduler_patience
         )
         # Define EMA object once every training loop
         ema = None
@@ -87,7 +104,7 @@ class Trainer:
             "valid_loss": [],
             "valid_energy_mae": [],
             "valid_force_mae": [],
-            "learning_rate": [],
+            "learning_rate": []
         }
         best_state = None
         best_epoch = 0
@@ -95,9 +112,9 @@ class Trainer:
         patience_counter = 0
 
         for epoch in range(1, self.max_epochs + 1):
-            current_lr = optimizer.param_groups[0]["lr"]
+            current_lr = optimiser.param_groups[0]["lr"]
             train_metrics = self._run_epoch(
-                model, train_loader, optimizer, loss_fn, training=True, ema=ema
+                model, train_loader, optimiser, loss_fn, training=True, ema=ema
             )
             train_loss = train_metrics["loss"]
 
@@ -107,7 +124,7 @@ class Trainer:
             )
             with validation_context:
                 valid_metrics = self._run_epoch(
-                    model, valid_loader, optimizer, loss_fn, training=False, test=True
+                    model, valid_loader, optimiser, loss_fn, training=False, test=True
                 )
                 valid_loss = valid_metrics["loss"]
 
@@ -141,7 +158,7 @@ class Trainer:
                 )
 
             # Only break if early stopping is true
-            if self.early_stopping and patience_counter >= self.patience:
+            if self.early_stopping and patience_counter >= self.stopping_patience:
                 break
         
         # If restore best, then go back to lowest validation loss state
@@ -158,10 +175,9 @@ class Trainer:
         self,
         model: torch.nn.Module,
         data_loader: DataLoader,
-        optimizer: torch.optim.Optimizer,
         loss_fn: torch.nn.Module,
         k: int = 5,
-        seed: int = 42,
+        seed: int = 42
     ):
         """
         Train k independent model copies using k-fold cross-validation.
@@ -180,13 +196,11 @@ class Trainer:
                 print(f"Fold {fold}/{k}")
             # Create a copy of the model to train
             fold_model = deepcopy(model).to(self.device)
-            fold_optimizer = self._build_fold_optimizer(optimizer, fold_model)
             fold_model, fold_history = self.train_model(
                 fold_model,
                 train_loader,
                 valid_loader,
-                fold_optimizer,
-                loss_fn,
+                loss_fn
             )
 
             model_key = f"model_{fold}"
@@ -196,15 +210,6 @@ class Trainer:
         full_history["combined"] = self._combine_fold_histories(full_history)
 
         return models, full_history
-
-    @staticmethod
-    def _build_fold_optimizer(optimizer, fold_model):
-        trainable_parameters = (
-            parameter
-            for parameter in fold_model.parameters()
-            if parameter.requires_grad
-        )
-        return type(optimizer)(trainable_parameters, **optimizer.defaults)
 
     @staticmethod
     def _combine_fold_histories(full_history):
@@ -217,7 +222,7 @@ class Trainer:
             "best_epoch": [],
             "valid_loss": [],
             "valid_energy_mae": [],
-            "valid_force_mae": [],
+            "valid_force_mae": []
         }
 
         for history in full_history.values():
@@ -237,7 +242,7 @@ class Trainer:
             values = torch.tensor(values, dtype=torch.float64)
             combined[metric] = (
                 torch.mean(values).item(),
-                torch.var(values, unbiased=False).item(),
+                torch.var(values, unbiased=False).item()
             )
 
         return combined
@@ -257,13 +262,13 @@ class Trainer:
                 batch_size=data_loader.batch_size,
                 shuffle=True,
                 drop_last=False,
-                generator=torch.Generator().manual_seed(seed + fold),
+                generator=torch.Generator().manual_seed(seed + fold)
             )
             valid_loader = DataLoader(
                 Subset(data_loader.dataset, valid_indices.tolist()),
                 batch_size=data_loader.batch_size,
                 shuffle=False,
-                drop_last=False,
+                drop_last=False
             )
             loader_pairs.append((train_loader, valid_loader))
 
@@ -273,11 +278,11 @@ class Trainer:
         self,
         model: torch.nn.Module,
         data_loader: DataLoader,
-        optimizer: torch.optim.Optimizer,
+        optimiser: torch.optim.Optimizer,
         loss_fn: torch.nn.Module,
         training: bool, # Training vs Validation Mode
         test: bool = False,
-        ema: Optional[ExponentialMovingAverage] = None,
+        ema: Optional[ExponentialMovingAverage] = None
     ) -> dict:
         model.train(training)
         total_loss = 0.0
@@ -304,7 +309,7 @@ class Trainer:
             batch_dict = batch.to_dict()
 
             if training:
-                optimizer.zero_grad(set_to_none=True)
+                optimiser.zero_grad(set_to_none=True)
 
             output = model(batch_dict, training=training)
             """
@@ -346,7 +351,7 @@ class Trainer:
                     torch.nn.utils.clip_grad_norm_(
                         model.parameters(), max_norm=self.max_grad_norm
                     )
-                optimizer.step()
+                optimiser.step()
                 # Update the EMA weights after the optimiser step if EMA is enabled
                 if ema is not None:
                     ema.update()
