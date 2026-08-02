@@ -1,5 +1,6 @@
 """Reusable training loop for X-MACE models."""
 
+from contextlib import nullcontext
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import Optional, Union
@@ -8,6 +9,7 @@ import torch
 from sklearn.model_selection import KFold
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.utils.data import Subset
+from torch_ema import ExponentialMovingAverage
 
 from mace.tools.torch_geometric import DataLoader
 
@@ -17,10 +19,17 @@ class Trainer:
     """
     General Trainer class that mostly follows the CLI default parameters
 
+    Early stopping is implemented but by default CLI doesnt use it, and instead relies
+    on LR reduction (patience 50) and max epoch 100 by default. If want to toggle manual
+    early stopping, set early_stopping to True and set patience to value less than max_epochs
+
     lr_factor and scheduler_patience are for the ReduceLROnPlateau scheduler
     Scheduler is defined before the epoch loop in train_model 
+
+    EMA is disabled by default. Set ema_decay to enable it for validation and
+    best-model restoration.
     """
-    max_epochs: int = 2048
+    max_epochs: int = 100
     early_stopping: bool = True
     patience: int = 2048
     restore_best: bool = True
@@ -29,6 +38,7 @@ class Trainer:
     verbose: bool = True
     lr_factor: float = 0.8
     scheduler_patience: int = 50
+    ema_decay: Optional[float] = 0.99
 
     def __post_init__(self) -> None:
         if self.max_epochs < 1:
@@ -41,6 +51,8 @@ class Trainer:
             raise ValueError("lr_factor must be between 0 and 1.")
         if self.scheduler_patience < 0:
             raise ValueError("scheduler_patience must be non-negative.")
+        if self.ema_decay is not None and not 0.0 < self.ema_decay < 1.0:
+            raise ValueError("ema_decay must be between 0 and 1, or None.")
 
         self.device = torch.device(self.device)
 
@@ -54,7 +66,10 @@ class Trainer:
     ):
         """
         Main trainer loop that controls the overall training like early stopping
-        or restoring the previous states. 
+        or restoring the previous states
+        The training loop calls on _run_epoch using either training or validaiton mode 
+        Learning rate scheduler and ema also controlled here 
+        For ema, the validation context is defined and used during validation mode
         """
         model.to(self.device)
         scheduler = ReduceLROnPlateau(
@@ -62,6 +77,10 @@ class Trainer:
             factor=self.lr_factor,
             patience=self.scheduler_patience,
         )
+        # Define EMA object once every training loop
+        ema = None
+        if self.ema_decay is not None:
+            ema = ExponentialMovingAverage(model.parameters(), decay=self.ema_decay)
 
         history = {
             "epoch": [],
@@ -79,13 +98,28 @@ class Trainer:
         for epoch in range(1, self.max_epochs + 1):
             current_lr = optimizer.param_groups[0]["lr"]
             train_metrics = self._run_epoch(
-                model, train_loader, optimizer, loss_fn, training=True
-            )
-            valid_metrics = self._run_epoch(
-                model, valid_loader, optimizer, loss_fn, training=False, test=True
+                model, train_loader, optimizer, loss_fn, training=True, ema=ema
             )
             train_loss = train_metrics["loss"]
-            valid_loss = valid_metrics["loss"]
+
+            # Use the ema context for validation loss
+            validation_context = (
+                ema.average_parameters() if ema is not None else nullcontext()
+            )
+            with validation_context:
+                valid_metrics = self._run_epoch(
+                    model, valid_loader, optimizer, loss_fn, training=False, test=True
+                )
+                valid_loss = valid_metrics["loss"]
+
+                # Best copy depends on ema weights also
+                if valid_loss < best_valid_loss:
+                    best_valid_loss = valid_loss
+                    best_epoch = epoch
+                    best_state = deepcopy(model.state_dict())
+                    patience_counter = 0
+                else:
+                    patience_counter += 1
 
             history["epoch"].append(epoch)
             history["train_loss"].append(train_loss)
@@ -96,17 +130,6 @@ class Trainer:
 
             # Update the optimiser learning rate for the next epoch
             scheduler.step(valid_loss)
-
-            # Now settle the early stopping logic 
-            # If the validation loss doesnt decrease, add to counter
-            # Save the best lowest validation loss
-            if valid_loss < best_valid_loss:
-                best_valid_loss = valid_loss
-                best_epoch = epoch
-                best_state = deepcopy(model.state_dict())
-                patience_counter = 0
-            else:
-                patience_counter += 1
 
             # Can toggle this to kill output
             if self.verbose:
@@ -255,6 +278,7 @@ class Trainer:
         loss_fn: torch.nn.Module,
         training: bool, # Training vs Validation Mode
         test: bool = False,
+        ema: Optional[ExponentialMovingAverage] = None,
     ) -> dict:
         model.train(training)
         total_loss = 0.0
@@ -324,6 +348,9 @@ class Trainer:
                         model.parameters(), max_norm=self.max_grad_norm
                     )
                 optimizer.step()
+                # Update the EMA weights after the optimiser step if EMA is enabled
+                if ema is not None:
+                    ema.update()
 
             total_loss += loss.detach().item()
             num_batches += 1
