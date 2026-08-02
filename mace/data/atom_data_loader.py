@@ -45,6 +45,7 @@ from typing import Dict, List, Optional
 import numpy as np
 import torch
 from ase import Atoms
+from ase.data import atomic_numbers
 
 from mace.tools import AtomicNumberTable, get_atomic_number_table_from_zs
 from mace.tools.torch_geometric import DataLoader
@@ -85,6 +86,7 @@ class AtomDataLoaderBuilder:
     energy_key: str = "REF_energy"
     forces_key: str = "REF_forces"
     metadata: Optional[AtomDataMetadata] = None
+    E0s: Optional[Dict[str, float]] = None
 
     def __post_init__(self) -> None:
         """
@@ -209,6 +211,43 @@ class AtomDataLoaderBuilder:
             all_configs.extend(configs)
         return all_configs
 
+    def _convert_e0s_to_array(self, z_table) -> np.ndarray:
+        """
+        Helper to convert the E0s dictionary into array of atomic energies
+        based on ase atomic_numbers table and z table 
+        If conversion fails then raises error with input format
+        """
+        try:
+            e0s_by_atomic_number = {
+                atomic_numbers[symbol]: float(value)
+                for symbol, value in self.E0s.items()
+            }
+
+            if len(e0s_by_atomic_number) != len(z_table):
+                raise ValueError
+
+            return np.array(
+                [e0s_by_atomic_number[int(z)] for z in z_table.zs],
+                dtype=np.float64,
+            )
+        except (AttributeError, KeyError, TypeError, ValueError):
+            raise ValueError(
+                "E0s must contain one value for every element in the z table, "
+                'for example {"H": -0.5, "C": -37.8}.'
+            ) from None
+
+    def _resolve_atomic_energies(self, all_configs, z_table) -> np.ndarray:
+        """
+        If the E0s are provided, then use those values to get atomic energies
+        If not E0s are calculated based on the average value of dataset
+        from the configs
+        """
+        if self.E0s is not None:
+            return self._convert_e0s_to_array(z_table)
+
+        average_e0s = compute_average_E0s(all_configs, z_table)
+        return np.array([average_e0s[z] for z in z_table.zs], dtype=np.float64)
+
     def _build_metadata(
         self, all_configs, z_table, atomic_dataset
     ) -> AtomDataMetadata:
@@ -219,10 +258,7 @@ class AtomDataLoaderBuilder:
         later when model is initialised
         """
         n_energies = self._infer_n_energies(all_configs)
-        atomic_energies_dict = compute_average_E0s(all_configs, z_table)
-        atomic_energies = np.array(
-            [atomic_energies_dict[z] for z in z_table.zs], dtype=np.float64
-        )
+        atomic_energies = self._resolve_atomic_energies(all_configs, z_table)
         avg_num_neighbors = self._compute_avg_num_neighbors(atomic_dataset)
 
         return AtomDataMetadata(
@@ -262,7 +298,7 @@ class AtomDataLoaderBuilder:
     def _validate_metadata(self, z_table, all_configs) -> None:
         """
         Validate that the metadata used from before supports the data
-        Check cutoff, z table, and number of energy states
+        Check cutoff, z table, number of energy states and E0s if provided
         """
         if not np.isclose(self.cutoff, self.metadata.r_max):
             raise ValueError("cutoff must match metadata.r_max.")
@@ -276,3 +312,10 @@ class AtomDataLoaderBuilder:
             raise ValueError(
                 "Input data must contain the same number of energies as metadata."
             )
+
+        # Convert E0s to array and double check for consistency if both 
+        # E0s and metadat are provided
+        if self.E0s is not None:
+            supplied_e0s = self._convert_e0s_to_array(z_table)
+            if not np.allclose(supplied_e0s, self.metadata.atomic_energies):
+                raise ValueError("Input E0s must match metadata.atomic_energies.")
