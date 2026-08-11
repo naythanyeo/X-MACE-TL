@@ -6,9 +6,7 @@ from dataclasses import dataclass
 from typing import Optional, Union
 
 import torch
-from sklearn.model_selection import KFold
 from torch.optim.lr_scheduler import ReduceLROnPlateau
-from torch.utils.data import Subset
 from torch_ema import ExponentialMovingAverage
 
 from mace.tools.torch_geometric import DataLoader
@@ -170,109 +168,6 @@ class Trainer:
         history["stopped_epoch"] = history["epoch"][-1]
 
         return model, history
-
-    def train_k_fold_models(
-        self,
-        model: torch.nn.Module,
-        data_loader: DataLoader,
-        loss_fn: torch.nn.Module,
-        k: int = 5,
-        seed: int = 42
-    ):
-        """
-        Train k independent model copies using k-fold cross-validation.
-        Records also the mean and variances of all of the k folds
-        """
-        dataset_size = len(data_loader.dataset)
-        if not 2 <= k <= dataset_size:
-            raise ValueError("k must be between 2 and the dataset size.")
-
-        fold_loaders = self._build_fold_loaders(data_loader, k, seed)
-        models = {}
-        full_history = {}
-
-        for fold, (train_loader, valid_loader) in enumerate(fold_loaders, start=1):
-            if self.verbose:
-                print(f"Fold {fold}/{k}")
-            # Create a copy of the model to train
-            fold_model = deepcopy(model).to(self.device)
-            fold_model, fold_history = self.train_model(
-                fold_model,
-                train_loader,
-                valid_loader,
-                loss_fn
-            )
-
-            model_key = f"model_{fold}"
-            models[model_key] = fold_model.cpu()
-            full_history[model_key] = fold_history
-
-        full_history["combined"] = self._combine_fold_histories(full_history)
-
-        return models, full_history
-
-    @staticmethod
-    def _combine_fold_histories(full_history):
-        """
-        For each fold, record the various properties then take the mean and variance 
-        Output into one combined dictionary 
-        """
-
-        fold_values = {
-            "best_epoch": [],
-            "valid_loss": [],
-            "valid_energy_mae": [],
-            "valid_force_mae": []
-        }
-
-        for history in full_history.values():
-            best_epoch = history["best_epoch"]
-            best_index = best_epoch - 1
-            fold_values["best_epoch"].append(best_epoch)
-            fold_values["valid_loss"].append(history["valid_loss"][best_index])
-            fold_values["valid_energy_mae"].append(
-                history["valid_energy_mae"][best_index]
-            )
-            fold_values["valid_force_mae"].append(
-                history["valid_force_mae"][best_index]
-            )
-
-        combined = {}
-        for metric, values in fold_values.items():
-            values = torch.tensor(values, dtype=torch.float64)
-            combined[metric] = (
-                torch.mean(values).item(),
-                torch.var(values, unbiased=False).item()
-            )
-
-        return combined
-
-    @staticmethod
-    def _build_fold_loaders(data_loader: DataLoader, k: int, seed: int):
-        """
-        Use SK-LEARN to build k fold loaders 
-        """
-        splitter = KFold(n_splits=k, shuffle=True, random_state=seed)
-        loader_pairs = []
-        for fold, (train_indices, valid_indices) in enumerate(
-            splitter.split(range(len(data_loader.dataset)))
-        ):
-            train_loader = DataLoader(
-                Subset(data_loader.dataset, train_indices.tolist()),
-                batch_size=data_loader.batch_size,
-                shuffle=True,
-                drop_last=False,
-                generator=torch.Generator().manual_seed(seed + fold)
-            )
-            valid_loader = DataLoader(
-                Subset(data_loader.dataset, valid_indices.tolist()),
-                batch_size=data_loader.batch_size,
-                shuffle=False,
-                drop_last=False
-            )
-            loader_pairs.append((train_loader, valid_loader))
-
-        return loader_pairs
 
     def _run_epoch(
         self,
