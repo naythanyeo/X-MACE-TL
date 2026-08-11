@@ -1,0 +1,52 @@
+"""
+Helper class for manually grouping batches by head.
+The class is initialised with a completed atomic dataset object
+It first builds indices by head, then uses that dictionary to construct
+batches from it such that each batch has only one head 
+The batches are shuffled randomly if specified. 
+
+__iter__ will be accessed by dataloader 
+"""
+
+import random
+
+from dataclasses import dataclass
+from typing import Iterator, List, Optional, Sequence
+
+from .atomic_data import AtomicData
+
+
+@dataclass
+class HeadBatchSampler:
+    atomic_dataset: Sequence[AtomicData]
+    batch_size: int
+    shuffle: bool = False
+    seed: Optional[int] = None
+
+    def __post_init__(self) -> None:
+        if self.batch_size < 1:
+            raise ValueError("batch_size must be at least 1.")
+
+        self._rng = random.Random(self.seed)
+        self.indices_by_head = {}
+
+        for dataset_index, atomic_data in enumerate(self.atomic_dataset):
+            head_index = int(atomic_data.head.item())
+            self.indices_by_head.setdefault(head_index, []).append(dataset_index)
+
+    def __iter__(self) -> Iterator[List[int]]:
+        batches = []
+
+        for head_indices in self.indices_by_head.values():
+            indices = head_indices.copy()
+
+            if self.shuffle:
+                self._rng.shuffle(indices)
+
+            for start in range(0, len(indices), self.batch_size):
+                batches.append(indices[start:start + self.batch_size])
+
+        if self.shuffle:
+            self._rng.shuffle(batches)
+
+        yield from batches

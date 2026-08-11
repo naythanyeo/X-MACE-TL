@@ -45,7 +45,7 @@ def main() -> None:
         atoms,
         batch_size=10,
         shuffle=False,
-        drop_last=False,
+        seed=42,
     )
 
     # For model we just use default ANI500K presets 

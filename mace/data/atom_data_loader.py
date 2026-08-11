@@ -51,6 +51,7 @@ from mace.tools import AtomicNumberTable, get_atomic_number_table_from_zs
 from mace.tools.torch_geometric import DataLoader
 
 from .atomic_data import AtomicData
+from .data_sampler import HeadBatchSampler
 from .utils import compute_average_E0s, config_from_atoms_list
 
 
@@ -141,7 +142,7 @@ class AtomDataLoaderBuilder:
         atoms,
         batch_size: int = 10,
         shuffle: bool = False,
-        drop_last: bool = False,
+        seed: Optional[int] = None,
     ) -> DataLoader:
         """
         Main loader function to convert an atoms list into dataloader
@@ -185,12 +186,12 @@ class AtomDataLoaderBuilder:
                 self._metadata.head_to_index,
             )
 
-        return DataLoader(
-            dataset=atomic_dataset,
-            batch_size=batch_size,
-            shuffle=shuffle,
-            drop_last=drop_last,
+        # Initialise the data sampler from atomic dataset
+        batch_sampler = HeadBatchSampler(
+            atomic_dataset, batch_size=batch_size, shuffle=shuffle, seed=seed
         )
+
+        return DataLoader(dataset=atomic_dataset, batch_sampler=batch_sampler)
 
     def get_metadata(self) -> AtomDataMetadata:
         if self._metadata is None:
