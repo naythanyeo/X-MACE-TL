@@ -253,25 +253,35 @@ class NonLinearDipoleReadoutBlock(torch.nn.Module):
 
 @compile_mode("script")
 class AtomicEnergiesBlock(torch.nn.Module):
+    """
+    Currently accept both 1D and 2D array for multiheaded training 
+    Autoencoder default is 2D but other models still use 1D 
+    """
     atomic_energies: torch.Tensor
 
     def __init__(self, atomic_energies: Union[np.ndarray, torch.Tensor]):
         super().__init__()
-        assert len(atomic_energies.shape) == 1
+        # Accept one E0 vector or a matrix of head-specific E0 vectors.
 
         self.register_buffer(
             "atomic_energies",
             torch.tensor(atomic_energies, dtype=torch.get_default_dtype()),
-        )  # [n_elements, ]
+        )  # [n_elements] or [n_heads, n_elements]
 
     def forward(
-        self, x: torch.Tensor  # one-hot of elements [..., n_elements]
+        self,
+        x: torch.Tensor,  # one-hot of elements [..., n_elements]
+        head: Optional[torch.Tensor] = None,  # Head index of the batch
     ) -> torch.Tensor:  # [..., ]
+        if head is not None:
+            return torch.matmul(x, self.atomic_energies[head])
         return torch.matmul(x, self.atomic_energies)
 
     def __repr__(self):
-        formatted_energies = ", ".join([f"{x:.4f}" for x in self.atomic_energies])
-        return f"{self.__class__.__name__}(energies=[{formatted_energies}])"
+        formatted_energies = np.array2string(
+            self.atomic_energies.detach().cpu().numpy(), precision=4
+        )
+        return f"{self.__class__.__name__}(energies={formatted_energies})"
 
 
 @compile_mode("script")

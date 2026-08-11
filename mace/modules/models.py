@@ -928,13 +928,16 @@ class AutoencoderExcitedMACE(torch.nn.Module):
         data["node_attrs"].requires_grad_(True)
         data["positions"].requires_grad_(True)
         num_graphs = data["ptr"].numel() - 1
+        # Head is specified here, this is the INDEX of head
+        # [0] since every batch has the same head
+        head = data["head"][0]
         displacement = torch.zeros(
             (num_graphs, 3, 3),
             dtype=data["positions"].dtype,
             device=data["positions"].device,
         )
         # Atomic energies
-        node_e0 = self.atomic_energies_fn(data["node_attrs"])
+        node_e0 = self.atomic_energies_fn(data["node_attrs"], head)
         e0 = scatter_sum(
             src=node_e0, index=data["batch"], dim=-1, dim_size=num_graphs
         )  # [n_graphs,]
