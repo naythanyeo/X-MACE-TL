@@ -151,6 +151,44 @@ class NonLinearReadoutBlock(torch.nn.Module):
         return self.linear_2(x)  # [n_nodes, 1]
 
 @compile_mode("script")
+class LinearNACReadoutBlock(torch.nn.Module):
+    def __init__(self, irreps_in: o3.Irreps, nac_indices: int):
+        super().__init__()
+        self.linear = o3.Linear(irreps_in=irreps_in,
+                                irreps_out=o3.Irreps(str(int(nac_indices)) + "x1o"))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.linear(x)
+
+
+@compile_mode("script")
+class NonLinearNACReadoutBlock(torch.nn.Module):
+    """
+    Note: this block currently will output 0s because NACs expects vector channels
+    However, the current model builds it such that the final interaction layer only
+    preserves scalar channels. This means that the inputs into the NACs only can recieve
+    scalars, so the NAC vectors cannot be created from the last (or usually second)
+    interactions block.
+    """
+    def __init__(
+        self, irreps_in: o3.Irreps, MLP_irreps: o3.Irreps, gate: Optional[Callable], nac_indices: int
+    ):
+        super().__init__()
+        self.hidden_irreps = MLP_irreps
+        self.linear_1 = o3.Linear(irreps_in=irreps_in,
+                                  irreps_out=self.hidden_irreps)
+        self.non_linearity = nn.Activation(irreps_in=self.hidden_irreps, acts=[gate])
+        self.irreps_in = irreps_in
+        self.linear_2 = o3.Linear(
+            irreps_in=self.hidden_irreps,
+            irreps_out=o3.Irreps(str(int(nac_indices)) + "x1o")
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:  # [n_nodes, irreps]  # [..., ]
+        x = self.non_linearity(self.linear_1(x))
+        return self.linear_2(x)  # [n_nodes, 1]
+
+@compile_mode("script")
 class LinearSocReadoutBlock(torch.nn.Module):
     def __init__(self, irreps_in: o3.Irreps, socs_indices: int):
         super().__init__()
@@ -896,11 +934,13 @@ class AutoencoderHead(torch.nn.Module):
     def __init__(self):
         # Initialise with nac and soc true false 
         # Initialise with multiple blocks, one for each head?
+        # Initialise during autencoder initialisation step?
         pass
 
     def forward(self, node_feats_list, head):
         pass
         # Output the energies, latent space, nacs and socs
+        # Input is only node feats list
 
 
 """

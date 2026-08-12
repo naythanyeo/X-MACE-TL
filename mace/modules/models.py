@@ -14,9 +14,11 @@ from .blocks import (
     EquivariantProductBasisBlock,
     InteractionBlock,
     LinearDipoleReadoutBlock,
+    LinearNACReadoutBlock,
     LinearNodeEmbeddingBlock,
     LinearReadoutBlock,
     NonLinearDipoleReadoutBlock,
+    NonLinearNACReadoutBlock,
     NonLinearReadoutBlock,
     LinearSocReadoutBlock,
     NonLinearSocReadoutBlock,
@@ -841,15 +843,15 @@ class AutoencoderExcitedMACE(torch.nn.Module):
             use_sc=use_sc_first,
         )
         self.products = torch.nn.ModuleList([prod])
+        self.nac_readouts = torch.nn.ModuleList()
         self.socs_readouts = torch.nn.ModuleList()
 
-        self.readouts = torch.nn.ModuleList()
+        if self.compute_nacs:
+            self.nac_readouts.append(
+                LinearNACReadoutBlock(hidden_irreps, self.nac_indices)
+            )
         if self.compute_socs:
             self.socs_readouts.append(LinearSocReadoutBlock(hidden_irreps, self.soc_indices))
-        else:
-            self.socs_readouts.append(None)
-
-        self.readouts.append(LinearReadoutBlock(hidden_irreps, n_energies, compute_nacs=compute_nacs, nac_indices=self.nac_indices))
 
         self.invariant_readouts = torch.nn.ModuleList()
         self.invariant_readouts.append(LinearReadoutBlock(hidden_irreps, num_permutational_invariant, compute_nacs=False, nac_indices=0))
@@ -881,21 +883,31 @@ class AutoencoderExcitedMACE(torch.nn.Module):
             )
             self.products.append(prod)
             if i == num_interactions - 2:
-                self.readouts.append(NonLinearReadoutBlock(hidden_irreps_out, MLP_irreps, gate, n_energies, compute_nacs, self.nac_indices))
+                if self.compute_nacs:
+                    self.nac_readouts.append(
+                        NonLinearNACReadoutBlock(
+                            hidden_irreps_out,
+                            MLP_irreps,
+                            gate,
+                            self.nac_indices,
+                        )
+                    )
                 if self.compute_socs:
                     self.socs_readouts.append(NonLinearSocReadoutBlock(hidden_irreps_out, MLP_irreps, gate, self.soc_indices))
-                else:
-                    self.socs_readouts.append(None)
             else:
-                self.readouts.append(LinearReadoutBlock(hidden_irreps, n_energies, compute_nacs, self.nac_indices))
+                if self.compute_nacs:
+                    self.nac_readouts.append(
+                        LinearNACReadoutBlock(hidden_irreps, self.nac_indices)
+                    )
                 if self.compute_socs:
                     self.socs_readouts.append(LinearSocReadoutBlock(hidden_irreps, self.soc_indices))
-                else:
-                    self.socs_readouts.append(None)
 
             self.invariant_readouts.append(NonLinearReadoutBlock(hidden_irreps_out, MLP_irreps, gate, num_permutational_invariant, compute_nacs=False, nac_indices=0))
+        autoencoder_head = AutoencoderHead() # Add in relevant blocks here
+        # Module list for different heads, can be duplicated later on
+        # Accessed by the head later on
+        self.autoencoder_heads = torch.nn.ModuleList([autoencoder_head])
 
-        self.AutoencoderHead = AutoencoderHead()
     def prepare_loss_outputs(
         self,
         batch: Dict[str, torch.Tensor],
@@ -979,10 +991,12 @@ class AutoencoderExcitedMACE(torch.nn.Module):
             node_feats_list.append(node_feats)
 
         """
-        TBC construction of the head_class
+        TBC construction of the head_class see the outputs and edit later on
         """
-        head = self.AutoencoderHead[head]
-        interaction_energies, invariant_vals, nacs, socs = head(node_feats_list)
+        head_block = self.autoencoder_heads[head]
+        interaction_energies, invariant_vals, nacs, socs = head_block(
+            node_feats_list
+        )
 
         # Outputs
         forces, virials, stress, hessian = get_outputs(
