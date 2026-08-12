@@ -11,6 +11,8 @@ from typing import Tuple
 
 import torch
 
+from mace.data.atom_data_loader import AtomDataMetadata
+
 
 model_layers = [
     "node_embedding",
@@ -78,11 +80,17 @@ class FreezeStrategy:
 class MultiHeadStrategy:
     """Duplicate a trained autoencoder head for multi-head training."""
 
-    num_heads: int
+    metadata: AtomDataMetadata
 
     def __post_init__(self) -> None:
-        if self.num_heads < 2:
-            raise ValueError("num_heads must be at least 2.")
+        if self.metadata.num_heads < 2:
+            raise ValueError("metadata must contain at least 2 heads.")
+
+        expected_shape = (self.metadata.num_heads, self.metadata.num_elements)
+        if self.metadata.atomic_energies.shape != expected_shape:
+            raise ValueError(
+                f"metadata.atomic_energies must have shape {expected_shape}."
+            )
 
     def apply(self, model: torch.nn.Module) -> torch.nn.Module:
         transfer_model = _copy_model(model)
@@ -92,10 +100,20 @@ class MultiHeadStrategy:
                 "MultiHeadStrategy expects a model with one template head."
             )
 
+        # Add in the multiple Heads
         template_head = transfer_model.autoencoder_heads[0]
         transfer_model.autoencoder_heads = torch.nn.ModuleList(
             [template_head]
-            + [deepcopy(template_head) for _ in range(self.num_heads - 1)]
+            + [deepcopy(template_head) for _ in range(self.metadata.num_heads - 1)]
         )
+
+        # Replace the e0s with the new metadata e0s
+        # Preserve dtype and device
+        current_e0s = transfer_model.atomic_energies_fn.atomic_energies
+        transfer_model.atomic_energies_fn.atomic_energies = torch.as_tensor(
+            self.metadata.atomic_energies,
+            dtype=current_e0s.dtype,
+            device=current_e0s.device,
+        ).clone()
 
         return transfer_model
