@@ -72,3 +72,30 @@ class FreezeStrategy:
                     parameter.requires_grad_(False)
 
         return transfer_model
+
+
+@dataclass
+class MultiHeadStrategy:
+    """Duplicate a trained autoencoder head for multi-head training."""
+
+    num_heads: int
+
+    def __post_init__(self) -> None:
+        if self.num_heads < 2:
+            raise ValueError("num_heads must be at least 2.")
+
+    def apply(self, model: torch.nn.Module) -> torch.nn.Module:
+        transfer_model = _copy_model(model)
+
+        if len(transfer_model.autoencoder_heads) != 1:
+            raise ValueError(
+                "MultiHeadStrategy expects a model with one template head."
+            )
+
+        template_head = transfer_model.autoencoder_heads[0]
+        transfer_model.autoencoder_heads = torch.nn.ModuleList(
+            [template_head]
+            + [deepcopy(template_head) for _ in range(self.num_heads - 1)]
+        )
+
+        return transfer_model
