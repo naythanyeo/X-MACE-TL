@@ -22,6 +22,7 @@ class HeadBatchSampler:
     batch_size: int
     shuffle: bool = False
     seed: Optional[int] = None
+    balance_heads: bool = False
 
     def __post_init__(self) -> None:
         if self.batch_size < 1:
@@ -36,12 +37,19 @@ class HeadBatchSampler:
 
     def __iter__(self) -> Iterator[List[int]]:
         batches = []
+        samples_per_head = None
+        if self.balance_heads:
+            samples_per_head = min(
+                len(indices) for indices in self.indices_by_head.values()
+            )
 
         for head_indices in self.indices_by_head.values():
             indices = head_indices.copy()
 
             if self.shuffle:
                 self._rng.shuffle(indices)
+            if samples_per_head is not None:
+                indices = indices[:samples_per_head]
 
             for start in range(0, len(indices), self.batch_size):
                 batches.append(indices[start:start + self.batch_size])

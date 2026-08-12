@@ -143,6 +143,7 @@ class AtomDataLoaderBuilder:
         batch_size: int = 10,
         shuffle: bool = False,
         seed: Optional[int] = None,
+        balance_heads: bool = False,
     ) -> DataLoader:
         """
         Main loader function to convert an atoms list into dataloader
@@ -188,7 +189,11 @@ class AtomDataLoaderBuilder:
 
         # Initialise the data sampler from atomic dataset
         batch_sampler = HeadBatchSampler(
-            atomic_dataset, batch_size=batch_size, shuffle=shuffle, seed=seed
+            atomic_dataset,
+            batch_size=batch_size,
+            shuffle=shuffle,
+            seed=seed,
+            balance_heads=balance_heads,
         )
 
         return DataLoader(dataset=atomic_dataset, batch_sampler=batch_sampler)
