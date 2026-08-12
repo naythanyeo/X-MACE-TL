@@ -931,67 +931,80 @@ class ScaleShiftBlock(torch.nn.Module):
 
 @compile_mode("script")
 class AutoencoderHead(torch.nn.Module):
-    def __init__(self):
-        # Initialise with nac and soc true false 
-        # Initialise with multiple blocks, one for each head?
-        # Initialise during autencoder initialisation step?
-        pass
+    def __init__(
+        self, 
+        invariant_readouts,
+        nac_readouts,
+        soc_readouts,
+        perm_encoder,
+        perm_decoder,
+        nac_indices
+    ):
+        super().__init__()
 
-    def forward(self, node_feats_list, head):
-        pass
-        # Output the energies, latent space, nacs and socs
-        # Input is only node feats list
+        self.invariant_readouts = invariant_readouts
+        self.nac_readouts = nac_readouts
+        self.soc_readouts = soc_readouts
+        self.perm_encoder = perm_encoder
+        self.perm_decoder = perm_decoder
+        self.nac_indices = nac_indices
+        self.compute_nacs = len(self.nac_readouts) > 0
+        self.compute_socs = len(self.soc_readouts) > 0
+        
+    def forward(self, node_feats_list, batch, num_graphs):
+        node_nacs_list = []
+        node_socs_list = []
+        invariant_list = []
+        for index, node_feats in enumerate(node_feats_list):
 
-
-"""
-Old forward function from the models
-
-            node_output = readout(node_feats).squeeze(-1)
-            node_invariant_output = invariant_readout(node_feats).squeeze(-1)
-            node_energies = torch.transpose(node_output[:, :self.n_energies], 0, 1)
-
+            # Add in NAC readouts if enabled
             if self.compute_nacs:
-                node_nacs = node_output[:, self.n_energies:self.n_energies + 3*self.nac_indices]
+                node_nacs = self.nac_readouts[index](
+                    node_feats
+                ) # [num_atoms, flattened_representation]
+                node_nacs = node_nacs.reshape(
+                    node_nacs.shape[0], self.nac_indices, 3
+                ) # [num_atoms, nac_indices, 3(3D vector)] 
+                node_nacs_list.append(node_nacs)
 
-                node_nacs_list.append(node_nacs.reshape(node_nacs.shape[0], self.nac_indices, 3))
-            
-            node_invariant_output = torch.transpose(node_invariant_output, 0, 1)
-            energy = scatter_sum(
-                src=node_energies, index=data["batch"], dim=-1, dim_size=num_graphs
-            )  # [n_graphs,]
-
-            invariant_energy = scatter_sum(
-                src=node_invariant_output, index=data["batch"], dim=-1, dim_size=num_graphs
-            )  # [n_graphs,]
-
-            energies.append(torch.transpose(energy, 0, 1))
-            invariant_contributions.append(invariant_energy)
+            # Add in SOC readouts if enabled 
             if self.compute_socs:
-                soc_output = soc_readout(node_feats)
-                soc_output = scatter_sum(
-                    src=soc_output, index=data["batch"], dim=0, dim_size=num_graphs
-                )  # [n_graphs,]
+                soc_output = self.soc_readouts[index](
+                    node_feats
+                ) # [num_atoms, soc_indices (1)]
+                graph_soc_output = scatter_sum(
+                    src=soc_output, index=batch, dim=0, dim_size=num_graphs
+                ) # [num_graphs, soc_indices (1)]
+                node_socs_list.append(graph_soc_output)
 
-                node_socs_list.append(soc_output)
+            # Add in the invariant outputs 
+            node_invariant_output = self.invariant_readouts[index](
+                node_feats
+            ) # [num_atoms, 16]
+            graph_invariants = scatter_sum(
+                src=node_invariant_output, index=batch, dim=0, dim_size=num_graphs
+            ) # [num_graphs, 16]
+            invariant_list.append(graph_invariants)
 
+        # Now sum all the outputs from both interaction node feats 
+        # Sum NACs first 
+        if self.compute_nacs:
+            nacs_contributions = torch.stack(node_nacs_list, dim=1)
+            total_nacs = torch.sum(nacs_contributions, dim=1)
+        else:
+            total_nacs = torch.tensor([])
+
+        # Sum the SOCs
         if self.compute_socs:
-            soc_contributions = torch.stack(node_socs_list, dim=1)
-            total_socs = torch.sum(soc_contributions, dim=1)
+            socs_contributions = torch.stack(node_socs_list, dim=1)
+            total_nacs = torch.sum(socs_contributions, dim=1)
         else:
             total_socs = torch.tensor([])
 
-        # Concatenate node features
-        node_feats_out = torch.cat(node_feats_list, dim=-1)
+        # Sum the invariant latent spaces 
+        invariant_contributions = torch.stack(invariant_list, dim=1)
+        invariant_vals = torch.sum(invariant_contributions, dim=1) 
+        # Feed the 16D latent space into the Decoder
+        decoded_energy = self.perm_decoder(invariant_vals)
 
-        invariant_contributions = torch.stack(invariant_contributions, dim=1)
-        invariant_vals = torch.sum(invariant_contributions, dim=1)  # [n_graphs, ]
-        invariant_vals = torch.transpose(invariant_vals, 0, 1)
-        decoded_vals = self.perm_decoder(invariant_vals) + e0.unsqueeze(-1).expand(-1, self.n_energies) + pair_energy.unsqueeze(-1).expand(-1, self.n_energies)
-        
-        if self.compute_nacs:
-            nacs_contributions = torch.stack(node_nacs_list, dim=1)
-            total_nacs = torch.sum(nacs_contributions, dim=1)  # [n_graphs, ]
-        else:
-            total_nacs = torch.tensor([])
-        
-"""
+        return total_nacs, total_socs, decoded_energy

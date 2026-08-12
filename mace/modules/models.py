@@ -903,6 +903,7 @@ class AutoencoderExcitedMACE(torch.nn.Module):
                     self.socs_readouts.append(LinearSocReadoutBlock(hidden_irreps, self.soc_indices))
 
             self.invariant_readouts.append(NonLinearReadoutBlock(hidden_irreps_out, MLP_irreps, gate, num_permutational_invariant, compute_nacs=False, nac_indices=0))
+
         autoencoder_head = AutoencoderHead() # Add in relevant blocks here
         # Module list for different heads, can be duplicated later on
         # Accessed by the head later on
