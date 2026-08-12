@@ -798,13 +798,7 @@ class AutoencoderExcitedMACE(torch.nn.Module):
         self.soc_indices = soc_num
         self.nac_indices = nac_num
 
-        self.perm_encoder = PermutationInvariantEncoder(latent_dim=num_permutational_invariant)
-        self.perm_decoder = PermutationInvariantDecoder(latent_dim=num_permutational_invariant, n_energies=n_energies)
-
         edge_feats_irreps = o3.Irreps(f"{self.radial_embedding.out_dim}x0e")
-        if pair_repulsion:
-            self.pair_repulsion_fn = ZBLBasis(r_max=r_max, p=num_polynomial_cutoff)
-            self.pair_repulsion = True
 
         sh_irreps = o3.Irreps.spherical_harmonics(max_ell)
         num_features = hidden_irreps.count(o3.Irrep(0, 1))
@@ -814,7 +808,7 @@ class AutoencoderExcitedMACE(torch.nn.Module):
         )
         if radial_MLP is None:
             radial_MLP = [64, 64, 64]
-        # Interactions and readout
+        # Interactions 
         self.atomic_energies_fn = AtomicEnergiesBlock(atomic_energies)
 
         inter = interaction_cls_first(
@@ -833,7 +827,7 @@ class AutoencoderExcitedMACE(torch.nn.Module):
         use_sc_first = False
         if "Residual" in str(interaction_cls_first):
             use_sc_first = True
-
+        # Products block
         node_feats_irreps_out = inter.target_irreps
         prod = EquivariantProductBasisBlock(
             node_feats_irreps=node_feats_irreps_out,
@@ -843,19 +837,27 @@ class AutoencoderExcitedMACE(torch.nn.Module):
             use_sc=use_sc_first,
         )
         self.products = torch.nn.ModuleList([prod])
-        self.nac_readouts = torch.nn.ModuleList()
-        self.socs_readouts = torch.nn.ModuleList()
 
+        # After this define all the head specific readout blocks 
+        # These will not be model attributes, but rather they belong to the head
+        nac_readouts = torch.nn.ModuleList()
         if self.compute_nacs:
-            self.nac_readouts.append(
+            nac_readouts.append(
                 LinearNACReadoutBlock(hidden_irreps, self.nac_indices)
             )
+
+        socs_readouts = torch.nn.ModuleList()
         if self.compute_socs:
-            self.socs_readouts.append(LinearSocReadoutBlock(hidden_irreps, self.soc_indices))
+            socs_readouts.append(
+                LinearSocReadoutBlock(hidden_irreps, self.soc_indices)
+            )
 
-        self.invariant_readouts = torch.nn.ModuleList()
-        self.invariant_readouts.append(LinearReadoutBlock(hidden_irreps, num_permutational_invariant, compute_nacs=False, nac_indices=0))
+        invariant_readouts = torch.nn.ModuleList()
+        invariant_readouts.append(
+            LinearReadoutBlock(hidden_irreps, num_permutational_invariant, compute_nacs=False, nac_indices=0)
+        )
 
+        # Add on the relevant interacion layers 
         for i in range(num_interactions - 1):
             if i == num_interactions - 2:
                 hidden_irreps_out = str(
@@ -884,7 +886,7 @@ class AutoencoderExcitedMACE(torch.nn.Module):
             self.products.append(prod)
             if i == num_interactions - 2:
                 if self.compute_nacs:
-                    self.nac_readouts.append(
+                    nac_readouts.append(
                         NonLinearNACReadoutBlock(
                             hidden_irreps_out,
                             MLP_irreps,
@@ -893,20 +895,31 @@ class AutoencoderExcitedMACE(torch.nn.Module):
                         )
                     )
                 if self.compute_socs:
-                    self.socs_readouts.append(NonLinearSocReadoutBlock(hidden_irreps_out, MLP_irreps, gate, self.soc_indices))
+                    socs_readouts.append(NonLinearSocReadoutBlock(hidden_irreps_out, MLP_irreps, gate, self.soc_indices))
             else:
                 if self.compute_nacs:
-                    self.nac_readouts.append(
+                    nac_readouts.append(
                         LinearNACReadoutBlock(hidden_irreps, self.nac_indices)
                     )
                 if self.compute_socs:
-                    self.socs_readouts.append(LinearSocReadoutBlock(hidden_irreps, self.soc_indices))
+                    socs_readouts.append(LinearSocReadoutBlock(hidden_irreps, self.soc_indices))
 
-            self.invariant_readouts.append(NonLinearReadoutBlock(hidden_irreps_out, MLP_irreps, gate, num_permutational_invariant, compute_nacs=False, nac_indices=0))
+            invariant_readouts.append(NonLinearReadoutBlock(hidden_irreps_out, MLP_irreps, gate, num_permutational_invariant, compute_nacs=False, nac_indices=0))
 
-        autoencoder_head = AutoencoderHead() # Add in relevant blocks here
-        # Module list for different heads, can be duplicated later on
-        # Accessed by the head later on
+        perm_encoder = PermutationInvariantEncoder(latent_dim=num_permutational_invariant)
+        perm_decoder = PermutationInvariantDecoder(latent_dim=num_permutational_invariant, n_energies=n_energies)
+
+        # Each block within the head is intentionally NOT a model attribute
+        # They all belong to the AutoencoderHead instead
+        autoencoder_head = AutoencoderHead(
+            invariant_readouts,
+            nac_readouts,
+            socs_readouts,
+            perm_encoder,
+            perm_decoder,
+            self.nac_indices
+        ) 
+
         self.autoencoder_heads = torch.nn.ModuleList([autoencoder_head])
 
     def prepare_loss_outputs(
@@ -917,16 +930,23 @@ class AutoencoderExcitedMACE(torch.nn.Module):
         """
         Hook function to get the autoencoder outputs from the data 
         Called during training and validation, but not inference 
+        This function is separate from the forward loop, it gets the encoder from the
+        AutoencoderHead. Gets head info from the data of each batch.
+
+        This just modifies outputs so the loss function has the required information.
         """
+        head = batch["head"][0]
+
         centred_energy = (
-            batch["energy"] - output["e0s"] - output["pair_energy"]
+            batch["energy"] - output["e0s"]
         ).unsqueeze(-1)
-        encoded_energy = self.perm_encoder(centred_energy)
+
+        encoded_energy = self.autoencoder_heads[head].perm_encoder(centred_energy)
 
         output = output.copy()
         output["encoded_energy"] = encoded_energy
         output["decoded_energy"] = (
-            self.perm_decoder(encoded_energy) + output["e0s"] + output["pair_energy"]
+            self.autoencoder_heads[head].perm_decoder(encoded_energy) + output["e0s"]
         )
         return output
 
@@ -939,10 +959,12 @@ class AutoencoderExcitedMACE(torch.nn.Module):
         compute_virials: bool = False,
         compute_stress: bool = False,
     ) -> Dict[str, Optional[torch.Tensor]]:
+        
         # Setup
         data["node_attrs"].requires_grad_(True)
         data["positions"].requires_grad_(True)
         num_graphs = data["ptr"].numel() - 1
+
         # Head is specified here, this is the INDEX of head
         # [0] since every batch has the same head
         head = data["head"][0]
@@ -955,7 +977,7 @@ class AutoencoderExcitedMACE(torch.nn.Module):
         node_e0 = self.atomic_energies_fn(data["node_attrs"], head)
         e0 = scatter_sum(
             src=node_e0, index=data["batch"], dim=-1, dim_size=num_graphs
-        )  # [n_graphs,]
+        )  
         # Embeddings
         node_feats = self.node_embedding(data["node_attrs"])
 
@@ -968,11 +990,8 @@ class AutoencoderExcitedMACE(torch.nn.Module):
         edge_feats = self.radial_embedding(
             lengths, data["node_attrs"], data["edge_index"], self.atomic_numbers
         )
-        pair_node_energy = torch.zeros_like(node_e0)
-        pair_energy = torch.zeros_like(e0)
 
         # Interactions
-        energies = [e0.unsqueeze(-1).expand(-1, self.n_energies), pair_energy.unsqueeze(-1).expand(-1, self.n_energies)]
         node_feats_list = []
 
         for interaction, product in zip(self.interactions, self.products):
@@ -991,17 +1010,20 @@ class AutoencoderExcitedMACE(torch.nn.Module):
             )
             node_feats_list.append(node_feats)
 
-        """
-        TBC construction of the head_class see the outputs and edit later on
-        """
+        # Pass node feats into the autoencoder head
         head_block = self.autoencoder_heads[head]
-        interaction_energies, invariant_vals, nacs, socs = head_block(
-            node_feats_list
+        decoded_energy, total_nacs, total_socs, invariant_vals = head_block(
+            node_feats_list,
+            data["batch"],
+            num_graphs
         )
+
+        # Add on E0s energy
+        total_energies = decoded_energy + e0.unsqueeze(-1)
 
         # Outputs
         forces, virials, stress, hessian = get_outputs(
-            energy=interaction_energies,
+            energy=total_energies,
             positions=data["positions"],
             displacement=displacement,
             cell=data["cell"],
@@ -1013,17 +1035,15 @@ class AutoencoderExcitedMACE(torch.nn.Module):
         )
 
         return {
-            "energy": interaction_energies,
+            "energy": total_energies,
             "invariant_vals": invariant_vals,
             "socs": total_socs,
             "nacs": total_nacs,
-            "dipoles": torch.tensor([]),
+            "dipoles": total_energies.new_empty((0,)),
             "forces": forces,
             "virials": virials,
             "stress": stress,
             "displacement": displacement,
             "hessian": hessian,
-            "node_feats": node_feats_out,
             "e0s": e0.unsqueeze(-1).expand(-1, self.n_energies),
-            "pair_energy": pair_energy.unsqueeze(-1).expand(-1, self.n_energies),
         }
