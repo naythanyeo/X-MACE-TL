@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from typing import Tuple
 
 import torch
+from e3nn import o3
 
 from mace.data.atom_data_loader import AtomDataMetadata
 
@@ -29,6 +30,43 @@ def _copy_model(model: torch.nn.Module) -> torch.nn.Module:
     if not isinstance(model, torch.nn.Module):
         raise TypeError("model must be a torch.nn.Module.")
     return deepcopy(model)
+
+
+def _reset_module_parameters(module: torch.nn.Module) -> None:
+    for child in module.modules():
+        if hasattr(child, "reset_parameters"):
+            child.reset_parameters()
+        elif isinstance(child, o3.Linear):
+            with torch.no_grad():
+                child.weight.normal_()
+                child.bias.zero_()
+
+
+def _zero_module_parameters(module: torch.nn.Module) -> None:
+    with torch.no_grad():
+        for parameter in module.parameters():
+            parameter.zero_()
+
+
+def _initialise_correction_head(head: torch.nn.Module) -> None:
+    _reset_module_parameters(head)
+    _zero_module_parameters(head.perm_decoder.decoder_nn[-1])
+
+    for nac_readout in head.nac_readouts:
+        output_layer = (
+            nac_readout.linear
+            if hasattr(nac_readout, "linear")
+            else nac_readout.linear_2
+        )
+        _zero_module_parameters(output_layer)
+
+    for soc_readout in head.socs_readouts:
+        output_layer = (
+            soc_readout.linear
+            if hasattr(soc_readout, "linear")
+            else soc_readout.linear_2
+        )
+        _zero_module_parameters(output_layer)
 
 
 @dataclass
@@ -105,11 +143,15 @@ class MultiHeadCorrectionStrategy:
                 "MultiHeadStrategy expects a model with one template head."
             )
 
-        # Add in the multiple Heads
         template_head = transfer_model.autoencoder_heads[0]
+        correction_heads = []
+        for _ in range(self.num_heads - 1):
+            correction_head = deepcopy(template_head)
+            _initialise_correction_head(correction_head)
+            correction_heads.append(correction_head)
+
         transfer_model.autoencoder_heads = torch.nn.ModuleList(
-            [template_head]
-            + [deepcopy(template_head) for _ in range(self.num_heads - 1)]
+            [template_head] + correction_heads
         )
 
         # Replace the e0s with the new metadata e0s
