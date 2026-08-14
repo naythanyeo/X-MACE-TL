@@ -941,16 +941,14 @@ class AutoencoderExcitedMACE(torch.nn.Module):
         """
         head = batch["head"][0]
 
-        centred_energy = (
-            batch["energy"] - output["e0s"]
-        ).unsqueeze(-1)
+        centred_energy = batch["centered_energy_difference"].unsqueeze(-1)
 
         encoded_energy = self.autoencoder_heads[head].perm_encoder(centred_energy)
 
         output = output.copy()
         output["encoded_energy"] = encoded_energy
-        output["decoded_energy"] = (
-            self.autoencoder_heads[head].perm_decoder(encoded_energy) + output["e0s"]
+        output["centered_decoded_energy"] = (
+            self.autoencoder_heads[head].perm_decoder(encoded_energy)
         )
         return output
 
@@ -1042,9 +1040,15 @@ class AutoencoderExcitedMACE(torch.nn.Module):
                     data["batch"],
                     num_graphs
                 )
-                decoded_energy += head_energy
-                total_nacs += head_nacs
-                total_socs += head_socs
+                # For the first head, energies are set to same type as head
+                if decoded_energy is None:
+                    decoded_energy = head_energy
+                    total_nacs = head_nacs
+                    total_socs = head_socs
+                else:
+                    decoded_energy += head_energy
+                    total_nacs += head_nacs
+                    total_socs += head_socs
                 # Only keep the invariant vals coresponding to the head, not accumulated
                 if model_head_idx == head:
                     invariant_vals = head_invariants
