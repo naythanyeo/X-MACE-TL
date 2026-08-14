@@ -77,8 +77,11 @@ class FreezeStrategy:
 
 
 @dataclass
-class MultiHeadStrategy:
-    """Duplicate a trained autoencoder head for multi-head training."""
+class MultiHeadCorrectionStrategy:
+    """
+    Duplicate a trained autoencoder head for multi-head training.
+    This trainer assumes a route with routed data rather than separated training
+    """
 
     metadata: AtomDataMetadata
 
@@ -92,6 +95,8 @@ class MultiHeadStrategy:
                 f"metadata.atomic_energies must have shape {expected_shape}."
             )
 
+        self.num_heads = self.metadata.num_heads
+
     def apply(self, model: torch.nn.Module) -> torch.nn.Module:
         transfer_model = _copy_model(model)
 
@@ -104,7 +109,7 @@ class MultiHeadStrategy:
         template_head = transfer_model.autoencoder_heads[0]
         transfer_model.autoencoder_heads = torch.nn.ModuleList(
             [template_head]
-            + [deepcopy(template_head) for _ in range(self.metadata.num_heads - 1)]
+            + [deepcopy(template_head) for _ in range(self.num_heads - 1)]
         )
 
         # Replace the e0s with the new metadata e0s
@@ -115,5 +120,73 @@ class MultiHeadStrategy:
             dtype=current_e0s.dtype,
             device=current_e0s.device,
         ).clone()
+
+        # Define the routes
+        route_matrix = torch.tril(
+            torch.ones(
+                self.num_heads, 
+                self.num_heads,
+                dtype=transfer_model.head_routes.dtype,
+                device=transfer_model.head_routes.device
+            )
+        )
+        transfer_model.head_routes = route_matrix
+
+        return transfer_model
+
+
+@dataclass
+class MultiHeadStrategy:
+    """
+    Duplicate a trained autoencoder head for multi-head training
+    This trainer will re train the HF data rather than treat
+    it as a correction
+    """
+
+    metadata: AtomDataMetadata
+
+    def __post_init__(self) -> None:
+        if self.metadata.num_heads < 2:
+            raise ValueError("metadata must contain at least 2 heads.")
+
+        expected_shape = (self.metadata.num_heads, self.metadata.num_elements)
+        if self.metadata.atomic_energies.shape != expected_shape:
+            raise ValueError(
+                f"metadata.atomic_energies must have shape {expected_shape}."
+            )
+
+        self.num_heads = self.metadata.num_heads
+
+    def apply(self, model: torch.nn.Module) -> torch.nn.Module:
+        transfer_model = _copy_model(model)
+
+        if len(transfer_model.autoencoder_heads) != 1:
+            raise ValueError(
+                "MultiHeadStrategy expects a model with one template head."
+            )
+
+        # Add in the multiple Heads
+        template_head = transfer_model.autoencoder_heads[0]
+        transfer_model.autoencoder_heads = torch.nn.ModuleList(
+            [template_head]
+            + [deepcopy(template_head) for _ in range(self.num_heads - 1)]
+        )
+
+        # Replace the e0s with the new metadata e0s
+        # Preserve dtype and device
+        current_e0s = transfer_model.atomic_energies_fn.atomic_energies
+        transfer_model.atomic_energies_fn.atomic_energies = torch.as_tensor(
+            self.metadata.atomic_energies,
+            dtype=current_e0s.dtype,
+            device=current_e0s.device,
+        ).clone()
+
+        # Define the routes
+        route_matrix = torch.eye(
+            self.num_heads,
+            dtype=transfer_model.head_routes.dtype,
+            device=transfer_model.head_routes.device
+        )
+        transfer_model.head_routes = route_matrix
 
         return transfer_model
