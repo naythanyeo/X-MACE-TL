@@ -1046,9 +1046,9 @@ class AutoencoderExcitedMACE(torch.nn.Module):
                     total_nacs = head_nacs
                     total_socs = head_socs
                 else:
-                    decoded_energy += head_energy
-                    total_nacs += head_nacs
-                    total_socs += head_socs
+                    decoded_energy = decoded_energy + head_energy
+                    total_nacs = total_nacs + head_nacs
+                    total_socs = total_socs + head_socs
                 # Only keep the invariant vals coresponding to the head, not accumulated
                 if model_head_idx == head:
                     invariant_vals = head_invariants

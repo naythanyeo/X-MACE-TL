@@ -68,6 +68,7 @@ class AtomDataMetadata:
     n_energies: int
     avg_num_neighbors: float
     head_to_index: Dict[str, int]
+    energy_difference_references: Dict[str, Optional[str]]
     atomic_numbers: List[int] = field(init=False)
     num_elements: int = field(init=False)
     num_heads: int = field(init=False)
@@ -186,6 +187,14 @@ class AtomDataLoaderBuilder:
             head_to_index = {
                 name: index for index, name in enumerate(configs_by_head)
             }
+            if self.energy_difference_references is None:
+                energy_difference_references = {
+                    head_name: None for head_name in head_to_index
+                }
+            else:
+                energy_difference_references = dict(
+                    self.energy_difference_references
+                )
             e0s_by_head = self._normalise_e0s(
                         configs_by_head, z_table, head_to_index
             )
@@ -194,14 +203,20 @@ class AtomDataLoaderBuilder:
                 configs_by_head,
                 z_table,
                 head_to_index,
-                atomic_energies
+                atomic_energies,
+                energy_difference_references,
             )
 
             atomic_dataset = self._build_atomic_dataset(
                 configs_by_head, z_table, head_to_index
             )
             self._metadata = self._build_metadata(
-                configs_by_head, z_table, atomic_energies, atomic_dataset, head_to_index
+                configs_by_head,
+                z_table,
+                atomic_energies,
+                atomic_dataset,
+                head_to_index,
+                energy_difference_references,
             )
         else:
             self._validate_metadata(z_table, configs_by_head)
@@ -209,7 +224,8 @@ class AtomDataLoaderBuilder:
                             configs_by_head,
                             self._metadata.z_table,
                             self._metadata.head_to_index,
-                            self._metadata.atomic_energies
+                            self._metadata.atomic_energies,
+                            self._metadata.energy_difference_references,
             )
             atomic_dataset = self._build_atomic_dataset(
                 configs_by_head,
@@ -356,7 +372,13 @@ class AtomDataLoaderBuilder:
         return np.stack([e0s_by_head[head] for head in ordered_heads])
 
     def _build_metadata(
-        self, configs_by_head, z_table, atomic_energies, atomic_dataset, head_to_index
+        self,
+        configs_by_head,
+        z_table,
+        atomic_energies,
+        atomic_dataset,
+        head_to_index,
+        energy_difference_references,
     ) -> AtomDataMetadata:
         """
         Builds the important metadata from the data that is used to initialise
@@ -375,6 +397,7 @@ class AtomDataLoaderBuilder:
             n_energies=n_energies,
             avg_num_neighbors=avg_num_neighbors,
             head_to_index=head_to_index,
+            energy_difference_references=energy_difference_references,
         )
 
     @staticmethod
@@ -443,7 +466,8 @@ class AtomDataLoaderBuilder:
             configs_by_head,
             z_table,
             head_to_index,
-            atomic_energies
+            atomic_energies,
+            energy_difference_references,
         ):
         """
         Take in all the configs_by_head and relevant data
@@ -458,10 +482,7 @@ class AtomDataLoaderBuilder:
 
         for head_name, configs in configs_by_head.items():
             head_index = head_to_index[head_name]
-            if self.energy_difference_references is None:
-                reference_head = None
-            else:
-                reference_head = self.energy_difference_references[head_name]
+            reference_head = energy_difference_references[head_name]
 
             for config in configs:
                 element_indices = [
