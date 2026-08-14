@@ -48,9 +48,28 @@ def _zero_module_parameters(module: torch.nn.Module) -> None:
             parameter.zero_()
 
 
+def _initialise_decoder_output(
+    decoder: torch.nn.Module, scale: float = 1e-4
+) -> None:
+    output_layer = decoder.decoder_nn[-1]
+
+    with torch.no_grad():
+        output_layer.weight.normal_(mean=0.0, std=scale)
+        output_layer.bias.zero_()
+
+        diagonal_bias = torch.linspace(
+            -scale,
+            scale,
+            decoder.n_energies,
+            dtype=output_layer.bias.dtype,
+            device=output_layer.bias.device,
+        )
+        output_layer.bias[:decoder.n_energies].copy_(diagonal_bias)
+
+
 def _initialise_correction_head(head: torch.nn.Module) -> None:
     _reset_module_parameters(head)
-    _zero_module_parameters(head.perm_decoder.decoder_nn[-1])
+    _initialise_decoder_output(head.perm_decoder)
 
     for nac_readout in head.nac_readouts:
         output_layer = (
