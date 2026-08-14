@@ -63,7 +63,7 @@ class AtomicData(torch_geometric.data.Data):
         nacs_weight: Optional[torch.tensor],
         forces: Optional[torch.Tensor],  # [n_nodes, 3]
         energy: Optional[torch.Tensor],  # [, ]
-        energy_difference: Optional[torch.Tensor], # [, ]
+        centered_energy_difference: Optional[torch.Tensor], # [, ]
         stress: Optional[torch.Tensor],  # [1,3,3]
         virials: Optional[torch.Tensor],  # [1,3,3]
         dipoles: Optional[torch.Tensor],  # [, 3]
@@ -86,7 +86,7 @@ class AtomicData(torch_geometric.data.Data):
         assert dipoles_weight is None or len(dipoles_weight.shape) == 0
         assert nacs_weight is None or len(nacs_weight.shape) == 0
         assert cell is None or cell.shape == (3, 3)
-        assert (energy_difference is None or energy is None or energy_difference.shape == energy.shape)
+        assert (centered_energy_difference is None or energy is None or centered_energy_difference.shape == energy.shape)
         assert forces is None or forces.shape[-1] == 3
         assert stress is None or stress.shape == (1, 3, 3)
         assert virials is None or virials.shape == (1, 3, 3)
@@ -111,7 +111,7 @@ class AtomicData(torch_geometric.data.Data):
             "nacs_weight": nacs_weight,
             "forces": forces,
             "energy": energy,
-            "energy_difference": energy_difference,
+            "centered_energy_difference": centered_energy_difference,
             "stress": stress,
             "virials": virials,
             "dipoles": dipoles,
@@ -193,9 +193,9 @@ class AtomicData(torch_geometric.data.Data):
             if config.energy is not None
             else None
         )
-        energy_difference = (
-            torch.tensor(config.energy_difference, dtype=torch.get_default_dtype())
-            if config.energy_difference is not None
+        centered_energy_difference = (
+            torch.tensor(config.centered_energy_difference, dtype=torch.get_default_dtype())
+            if config.centered_energy_difference is not None
             else None
         )
         stress = (
@@ -249,7 +249,7 @@ class AtomicData(torch_geometric.data.Data):
             nacs_weight=nacs_weight,
             forces=forces,
             energy=energy,
-            energy_difference=energy_difference,
+            centered_energy_difference=centered_energy_difference,
             stress=stress,
             virials=virials,
             dipoles=dipoles,

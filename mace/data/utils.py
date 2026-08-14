@@ -35,7 +35,8 @@ class Configuration:
     atomic_numbers: np.ndarray
     positions: Positions  # Angstrom
     energy: Optional[float] = None  # eV
-    energy_difference: Optional[float] = None #eV
+    energy_difference: Optional[float] = None # eV
+    centered_energy_difference: Optional[float] = None # eV
     forces: Optional[Forces] = None  # eV/Angstrom
     stress: Optional[Stress] = None  # eV/Angstrom^3
     virials: Optional[Virials] = None  # eV

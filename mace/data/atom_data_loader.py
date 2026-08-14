@@ -90,14 +90,23 @@ class AtomDataLoaderBuilder:
      - List[Atoms] for ordinary single-head data.
      - Dict[str, List[Atoms]] for labelled multi-head data.
 
+    Energy differences are initialised from the atoms list as raw differences
+    The E0s differences are subtracted based on the references specified
+    energy_difference_references={
+        "casscf": None,
+        "caspt2": "casscf",
+    }
     """
     cutoff: float = 5.0  # Max bond length
     # xyz file labels (ignore nac and socs)
     energy_key: str = "REF_energy"
+    energy_difference_key: str = "REF_raw_energy_differences"
     forces_key: str = "REF_forces"
+    nacs_key: str = "REF_nacs"
     E0s: Optional[
         Union[Dict[str, float], Dict[str, Dict[str, float]]]
     ] = None
+    energy_difference_references: Optional[Dict[str, Optional[str]]] = None
     _metadata: Optional[AtomDataMetadata] = field(
         init=False,
         default=None,
@@ -112,8 +121,12 @@ class AtomDataLoaderBuilder:
             raise ValueError("cutoff must be positive.")
         if not isinstance(self.energy_key, str) or not self.energy_key:
             raise ValueError("energy_key must be a non-empty string.")
+        if not isinstance(self.energy_difference_key, str) or not self.energy_difference_key:
+            raise ValueError("energy_difference_key must be a non-empty string.")
         if not isinstance(self.forces_key, str) or not self.forces_key:
             raise ValueError("forces_key must be a non-empty string.")
+        if not isinstance(self.nacs_key, str) or not self.nacs_key:
+            raise ValueError("nacs_key must be a non-empty string.")
 
         if self.E0s is not None:
             """
@@ -173,14 +186,31 @@ class AtomDataLoaderBuilder:
             head_to_index = {
                 name: index for index, name in enumerate(configs_by_head)
             }
+            e0s_by_head = self._normalise_e0s(
+                        configs_by_head, z_table, head_to_index
+            )
+            atomic_energies = self._e0s_to_matrix(e0s_by_head, head_to_index)
+            self._prepare_centered_energy_differences(
+                configs_by_head,
+                z_table,
+                head_to_index,
+                atomic_energies
+            )
+
             atomic_dataset = self._build_atomic_dataset(
                 configs_by_head, z_table, head_to_index
             )
             self._metadata = self._build_metadata(
-                configs_by_head, z_table, atomic_dataset, head_to_index
+                configs_by_head, z_table, atomic_energies, atomic_dataset, head_to_index
             )
         else:
             self._validate_metadata(z_table, configs_by_head)
+            self._prepare_centered_energy_differences(
+                            configs_by_head,
+                            self._metadata.z_table,
+                            self._metadata.head_to_index,
+                            self._metadata.atomic_energies
+            )
             atomic_dataset = self._build_atomic_dataset(
                 configs_by_head,
                 self._metadata.z_table,
@@ -220,9 +250,13 @@ class AtomDataLoaderBuilder:
         """
         Mini helper function to convert atoms list into config list
         """
-        config = config_from_atoms_list(atoms_list,
-                                        energy_key=self.energy_key,
-                                        forces_key=self.forces_key)
+        config = config_from_atoms_list(
+            atoms_list,
+            energy_key=self.energy_key,
+            energy_difference_key=self.energy_difference_key,
+            forces_key=self.forces_key,
+            nacs_key=self.nacs_key
+        )
         return config
 
     def _build_atomic_dataset(self, configs_by_head, z_table, head_to_index):
@@ -322,7 +356,7 @@ class AtomDataLoaderBuilder:
         return np.stack([e0s_by_head[head] for head in ordered_heads])
 
     def _build_metadata(
-        self, configs_by_head, z_table, atomic_dataset, head_to_index
+        self, configs_by_head, z_table, atomic_energies, atomic_dataset, head_to_index
     ) -> AtomDataMetadata:
         """
         Builds the important metadata from the data that is used to initialise
@@ -332,10 +366,6 @@ class AtomDataLoaderBuilder:
         """
         all_configs = self._flatten_configs(configs_by_head)
         n_energies = self._infer_n_energies(all_configs)
-        e0s_by_head = self._normalise_e0s(
-            configs_by_head, z_table, head_to_index
-        )
-        atomic_energies = self._e0s_to_matrix(e0s_by_head, head_to_index)
         avg_num_neighbors = self._compute_avg_num_neighbors(atomic_dataset)
 
         return AtomDataMetadata(
@@ -407,3 +437,65 @@ class AtomDataLoaderBuilder:
             )
             if not np.allclose(supplied_e0s, self._metadata.atomic_energies):
                 raise ValueError("Input E0s must match metadata.atomic_energies.")
+
+    def _prepare_centered_energy_differences(
+            self,
+            configs_by_head,
+            z_table,
+            head_to_index,
+            atomic_energies
+        ):
+        """
+        Take in all the configs_by_head and relevant data
+        Take config.energy_differences and create a centered_energy_differences
+        This centered energy differences is then fed into the dataloader
+        It correctly accounts for the differences in E0s
+
+        Also validates and raises error here if multihead is attempted without
+        providing raw differences. 
+        """
+        z_to_index = {int(z): index for index, z in enumerate(z_table.zs)}
+
+        for head_name, configs in configs_by_head.items():
+            head_index = head_to_index[head_name]
+            if self.energy_difference_references is None:
+                reference_head = None
+            else:
+                reference_head = self.energy_difference_references[head_name]
+
+            for config in configs:
+                element_indices = [
+                    z_to_index[int(z)] for z in config.atomic_numbers
+                ]
+                raw_differences = config.energy_difference
+                energy = np.asarray(config.energy)
+                current_e0 = atomic_energies[head_index, element_indices].sum()
+
+                # First check the reference head to determine if differences are required
+                # This can be for single head training, or the base LF data
+                if reference_head is None:
+                    config.centered_energy_difference = energy - current_e0
+                    continue
+                else:
+                    # If the reference head is not none, expect energy differences to be provided
+                    if raw_differences is None:
+                        raise ValueError(
+                            "Must specify raw differences for multihead training"
+                        )
+                    
+                    # First convert raw differences into np array
+                    raw_differences = np.asarray(raw_differences)
+                    reference_index = head_to_index[reference_head]
+                    reference_e0 = atomic_energies[reference_index, element_indices].sum()
+
+                    """
+                    Cases: if I just input CASSCF --> raw diff is None, centered diff is energy - E0
+                    If input both Casscf and CASPT2
+                    when evaluating CASSCF energy, reference is None 
+                        -> Center diff is CASSCF energy - CASSCF E0
+                    when evaluating CASPT2 energy, reference is CASSCF E0 
+                        -> Want (CASPT2 energy - CASPT2 E0) - (CASSCF energy - CASSCF E0)
+                        -> Center diff is CASPT2 energy - CASSCF energy (input) - (CASPT2 E0 - CASSCF E0)
+                        -> Subtract difference between CASPT2 (current) and CASSCF (ref) E0s
+                    """
+                    config.centered_energy_difference = raw_differences - (current_e0 - reference_e0)
