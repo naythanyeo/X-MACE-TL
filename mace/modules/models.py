@@ -773,6 +773,10 @@ class AutoencoderExcitedMACE(torch.nn.Module):
         self.register_buffer(
             "num_interactions", torch.tensor(num_interactions, dtype=torch.int64)
         )
+        # Buffer to track all the routes, allows for stacking of paths in forward
+        self.register_buffer(
+            "head_routes", torch.eye(1)
+        )
 
         self.n_energies = n_energies
         self.num_permutational_invariant = num_permutational_invariant
@@ -1010,13 +1014,40 @@ class AutoencoderExcitedMACE(torch.nn.Module):
             )
             node_feats_list.append(node_feats)
 
-        # Pass node feats into the autoencoder head
-        head_block = self.autoencoder_heads[head]
-        decoded_energy, total_nacs, total_socs, invariant_vals = head_block(
-            node_feats_list,
-            data["batch"],
-            num_graphs
-        )
+        """
+        head_routes is a matrix, eg [1, 0], [1, 1] --> In this case CASSCF is [1, 0] and CASPT2 is [1, 1]
+        Let CASSCF be head 0, then its route will be [1, 0]
+        This means that it will go through block 0 but not block 1
+        For CASPT2, head 1, the route is [1, 1] --> Goes through both block 0 and 1
+        The energy, NAC and SOC outputs will be added and SUMMED from the route
+        Invariant latent space will only be the head itself's latent space, to be compared with the
+        encoder outputs of the energy differences 
+        """
+        # Accumulated values 
+        decoded_energy = None
+        total_nacs = None
+        total_socs = None
+        # One value only
+        invariant_vals = None
+
+        # Select route from the head
+        route = self.head_routes[head]
+
+        # Enumerate all the autoencoder heads
+        for model_head_idx, head_block in enumerate(self.autoencoder_heads):
+            # Only pass through if the route deems it 1
+            if route[model_head_idx] == 1:
+                head_energy, head_nacs, head_socs, head_invariants = head_block(
+                    node_feats_list,
+                    data["batch"],
+                    num_graphs
+                )
+                decoded_energy += head_energy
+                total_nacs += head_nacs
+                total_socs += head_socs
+                # Only keep the invariant vals coresponding to the head, not accumulated
+                if model_head_idx == head:
+                    invariant_vals = head_invariants
 
         # Add on E0s energy
         total_energies = decoded_energy + e0.unsqueeze(-1)
