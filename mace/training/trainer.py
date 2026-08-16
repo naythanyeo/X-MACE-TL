@@ -35,6 +35,8 @@ class Trainer:
 
     optimiser_lr: float = 1e-3
     optimiser_weight_decay: float = 5e-7
+    optimiser_base_head_lr: Optional[float] = None
+    optimiser_new_head_lr: Optional[float] = None
     max_grad_norm: Optional[float] = 10.0
 
     scheduler_lr_factor: float = 0.8
@@ -53,6 +55,12 @@ class Trainer:
             raise ValueError("optimiser_lr must be positive.")
         if self.optimiser_weight_decay < 0.0:
             raise ValueError("optimiser_weight_decay must be non-negative.")
+        for name, value in (
+            ("optimiser_base_head_lr", self.optimiser_base_head_lr),
+            ("optimiser_new_head_lr", self.optimiser_new_head_lr),
+        ):
+            if value is not None and value <= 0.0:
+                raise ValueError(f"{name} must be positive or None.")
         if not 0.0 < self.scheduler_lr_factor < 1.0:
             raise ValueError("scheduler_lr_factor must be between 0 and 1.")
         if self.scheduler_patience < 0:
@@ -84,7 +92,9 @@ class Trainer:
         optimiser = build_optimiser(
             model,
             lr=self.optimiser_lr,
-            weight_decay=self.optimiser_weight_decay
+            weight_decay=self.optimiser_weight_decay,
+            base_head_lr=self.optimiser_base_head_lr,
+            new_head_lr=self.optimiser_new_head_lr,
         )
         scheduler = ReduceLROnPlateau(
             optimiser,
@@ -102,7 +112,8 @@ class Trainer:
             "valid_loss": [],
             "valid_energy_mae": [],
             "valid_force_mae": [],
-            "learning_rate": []
+            "learning_rate": [],
+            "learning_rates": [],
         }
         best_state = None
         best_epoch = 0
@@ -110,7 +121,19 @@ class Trainer:
         patience_counter = 0
 
         for epoch in range(1, self.max_epochs + 1):
-            current_lr = optimiser.param_groups[0]["lr"]
+            current_lrs = {
+                group["name"]: group["lr"]
+                for group in optimiser.param_groups
+            }
+            category_lrs = {
+                "gnn": current_lrs.get("gnn_no_decay", current_lrs.get("gnn_decay")),
+                "base_head": current_lrs.get(
+                    "base_head_no_decay", current_lrs.get("base_head_decay")
+                ),
+                "new_head": current_lrs.get(
+                    "new_head_no_decay", current_lrs.get("new_head_decay")
+                ),
+            }
             train_metrics = self._run_epoch(
                 model, train_loader, optimiser, loss_fn, training=True, ema=ema
             )
@@ -140,19 +163,25 @@ class Trainer:
             history["valid_loss"].append(valid_loss)
             history["valid_energy_mae"].append(valid_metrics["energy_mae"])
             history["valid_force_mae"].append(valid_metrics["force_mae"])
-            history["learning_rate"].append(current_lr)
+            history["learning_rate"].append(category_lrs["gnn"])
+            history["learning_rates"].append(current_lrs)
 
             # Update the optimiser learning rate for the next epoch
             scheduler.step(valid_loss)
 
             # Can toggle this to kill output
             if self.verbose:
+                active_lrs = " | ".join(
+                    f"{name}_lr={value:.2e}"
+                    for name, value in category_lrs.items()
+                    if value is not None
+                )
                 print(
                     f"Epoch {epoch:03d} | train_loss={train_loss:.6f} | "
                     f"valid_loss={valid_loss:.6f} | "
                     f"energy_mae={valid_metrics['energy_mae']:.6f} | "
                     f"force_mae={valid_metrics['force_mae']:.6f} | "
-                    f"lr={current_lr:.2e}"
+                    f"{active_lrs}"
                 )
 
             # Only break if early stopping is true
