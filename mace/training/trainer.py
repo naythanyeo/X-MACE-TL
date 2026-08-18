@@ -59,7 +59,7 @@ class Trainer:
             ("optimiser_base_head_lr", self.optimiser_base_head_lr),
             ("optimiser_new_head_lr", self.optimiser_new_head_lr),
         ):
-            if value is not None and value <= 0.0:
+            if value is not None and value < 0.0:
                 raise ValueError(f"{name} must be positive or None.")
         if not 0.0 < self.scheduler_lr_factor < 1.0:
             raise ValueError("scheduler_lr_factor must be between 0 and 1.")
