@@ -112,6 +112,8 @@ class Trainer:
             "valid_loss": [],
             "valid_energy_mae": [],
             "valid_force_mae": [],
+            "train_loss_breakdown": [],
+            "valid_loss_breakdown": [],
             "learning_rate": [],
             "learning_rates": [],
         }
@@ -163,6 +165,12 @@ class Trainer:
             history["valid_loss"].append(valid_loss)
             history["valid_energy_mae"].append(valid_metrics["energy_mae"])
             history["valid_force_mae"].append(valid_metrics["force_mae"])
+            history["train_loss_breakdown"].append(
+                train_metrics.get("loss_breakdown", {})
+            )
+            history["valid_loss_breakdown"].append(
+                valid_metrics.get("loss_breakdown", {})
+            )
             history["learning_rate"].append(category_lrs["gnn"])
             history["learning_rates"].append(current_lrs)
 
@@ -211,6 +219,7 @@ class Trainer:
         model.train(training)
         total_loss = 0.0
         num_batches = 0
+        breakdown_totals = {}
         energy_absolute_error = None
         force_absolute_error = None
         energy_count = 0
@@ -247,6 +256,15 @@ class Trainer:
                 output = prepare_outputs(batch_dict, output)
 
             loss = loss_fn(pred=output, ref=batch)
+            breakdown = getattr(loss_fn, "loss_breakdown", None)
+            if breakdown is not None:
+                head = int(batch["head"][0].item())
+                for name, value in breakdown.items():
+                    if value is not None:
+                        key = f"{head}_{name}"
+                        breakdown_totals[key] = breakdown_totals.get(key, 0.0) + (
+                            value.detach().item()
+                        )
 
             if test:
                 """
@@ -287,6 +305,8 @@ class Trainer:
             raise ValueError("DataLoader is empty.")
 
         metrics = {"loss": total_loss / num_batches}
+        if breakdown_totals:
+            metrics["loss_breakdown"] = breakdown_totals
         if test:
             metrics["energy_mae"] = energy_absolute_error.item() / energy_count
             metrics["force_mae"] = force_absolute_error.item() / force_count
