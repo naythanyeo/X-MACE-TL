@@ -35,8 +35,6 @@ class Trainer:
 
     optimiser_lr: float = 1e-3
     optimiser_weight_decay: float = 5e-7
-    optimiser_base_head_lr: Optional[float] = None
-    optimiser_new_head_lr: Optional[float] = None
     max_grad_norm: Optional[float] = 10.0
 
     scheduler_lr_factor: float = 0.8
@@ -55,12 +53,6 @@ class Trainer:
             raise ValueError("optimiser_lr must be positive.")
         if self.optimiser_weight_decay < 0.0:
             raise ValueError("optimiser_weight_decay must be non-negative.")
-        for name, value in (
-            ("optimiser_base_head_lr", self.optimiser_base_head_lr),
-            ("optimiser_new_head_lr", self.optimiser_new_head_lr),
-        ):
-            if value is not None and value < 0.0:
-                raise ValueError(f"{name} must be positive or None.")
         if not 0.0 < self.scheduler_lr_factor < 1.0:
             raise ValueError("scheduler_lr_factor must be between 0 and 1.")
         if self.scheduler_patience < 0:
@@ -92,9 +84,7 @@ class Trainer:
         optimiser = build_optimiser(
             model,
             lr=self.optimiser_lr,
-            weight_decay=self.optimiser_weight_decay,
-            base_head_lr=self.optimiser_base_head_lr,
-            new_head_lr=self.optimiser_new_head_lr,
+            weight_decay=self.optimiser_weight_decay
         )
         scheduler = ReduceLROnPlateau(
             optimiser,
