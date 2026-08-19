@@ -252,7 +252,6 @@ def initialise_autoencoder(
         if "lr_multiplier" not in module._buffers:
             module.register_buffer(
                 "lr_multiplier",
-                torch.tensor(1.0),
-                persistent=False
+                torch.tensor(1.0)
             )
     return model

@@ -13,6 +13,9 @@ import torch
 from e3nn import o3
 
 from mace.data.atom_data_loader import AtomDataMetadata
+from mace.modules.blocks import (
+    DifferenceDecoder
+)
 
 
 model_layers = [
@@ -48,25 +51,6 @@ def _zero_module_parameters(module: torch.nn.Module) -> None:
             parameter.zero_()
 
 
-def _initialise_decoder_output(
-    decoder: torch.nn.Module, scale: float = 1e-4
-) -> None:
-    output_layer = decoder.decoder_nn[-1]
-
-    with torch.no_grad():
-        output_layer.weight.normal_(mean=0.0, std=scale)
-        output_layer.bias.zero_()
-
-        diagonal_bias = torch.linspace(
-            -scale,
-            scale,
-            decoder.n_energies,
-            dtype=output_layer.bias.dtype,
-            device=output_layer.bias.device,
-        )
-        output_layer.bias[:decoder.n_energies].copy_(diagonal_bias)
-
-
 def _initialise_correction_head(head: torch.nn.Module) -> None:
     """
     Helper to initialise the correction head instead of just deep copying it
@@ -74,7 +58,6 @@ def _initialise_correction_head(head: torch.nn.Module) -> None:
     to the actual values. Else the initial input will be almost double the errors
     """
     _reset_module_parameters(head)
-    _initialise_decoder_output(head.perm_decoder)
 
     for nac_readout in head.nac_readouts:
         output_layer = (
@@ -92,6 +75,10 @@ def _initialise_correction_head(head: torch.nn.Module) -> None:
         )
         _zero_module_parameters(output_layer)
 
+def _set_lr_multiplier(module, multiplier):
+    for child in module.modules():
+        if hasattr(child, "lr_multiplier"):
+            child.lr_multiplier.fill_(multiplier)
 
 @dataclass
 class NaiveStrategy:
@@ -143,13 +130,13 @@ class MultiHeadCorrectionStrategy:
     """
     Duplicate a trained autoencoder head for multi-head training.
     This trainer assumes a route with routed data rather than separated training
-    GNN Lr is taken to be the base LR for all
-    Base and correction head LR are relative to the GNN LR
+    LR here will all be taken relative to the Trainer's LR
     """
 
     metadata: AtomDataMetadata
-    base_head_lr: float = 0.1
-    correction_head_lr: float = 10
+    gnn_lr: float = 0.01
+    base_head_lr: float = 0.01
+    correction_head_lr: float = 1
 
     def __post_init__(self) -> None:
         if self.metadata.num_heads < 2:
@@ -171,25 +158,53 @@ class MultiHeadCorrectionStrategy:
                 "MultiHeadStrategy expects a model with one template head."
             )
 
+        # First copy the head and add the correction blocks
         template_head = transfer_model.autoencoder_heads[0]
         correction_heads = []
         for _ in range(self.num_heads - 1):
             correction_head = deepcopy(template_head)
+            # Temp fix, TBC more robust dimensions later on 
+            correction_head.perm_decoder = DifferenceDecoder(ground_dim=8, 
+                                                             excited_dim=8, 
+                                                             hidden_dim=128, 
+                                                             n_energies=3)
+            for module in correction_head.perm_decoder.modules():
+                module.register_buffer(
+                    "lr_multiplier",
+                    torch.tensor(1.0)
+                )
             _initialise_correction_head(correction_head)
             correction_heads.append(correction_head)
+            
 
         transfer_model.autoencoder_heads = torch.nn.ModuleList(
             [template_head] + correction_heads
         )   
 
-        # Fill in the learning rates
-        for module in transfer_model.autoencoder_heads[0].modules():
-            if hasattr(module, "lr_multiplier"):
-                module.lr_multiplier.fill_(self.base_head_lr)
-        for i in range(1, self.num_heads):
-            for module in transfer_model.autoencoder_heads[i].modules():
-                if hasattr(module, "lr_multiplier"):
-                    module.lr_multiplier.fill_(self.correction_head_lr)
+        # Modify the modles LR with helper function 
+        # First all the GNN blocks (nodes, interactions, products)
+        _set_lr_multiplier(
+            transfer_model.node_embedding,
+            self.gnn_lr,
+        )
+
+        for interaction in transfer_model.interactions:
+            _set_lr_multiplier(interaction, self.gnn_lr)
+
+        for product in transfer_model.products:
+            _set_lr_multiplier(product, self.gnn_lr)
+
+        # Then set LR for the base and correction heads
+        _set_lr_multiplier(
+            transfer_model.autoencoder_heads[0],
+            self.base_head_lr,
+        )
+
+        for correction_head in transfer_model.autoencoder_heads[1:]:
+            _set_lr_multiplier(
+                correction_head,
+                self.correction_head_lr,
+            )
 
         # Replace the e0s with the new metadata e0s
         # Preserve dtype and device

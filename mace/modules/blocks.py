@@ -1010,3 +1010,55 @@ class AutoencoderHead(torch.nn.Module):
             total_socs = invariant_vals.new_empty((0,))
 
         return decoded_energy, total_nacs, total_socs, invariant_vals
+
+
+@compile_mode("script")
+class DifferenceDecoder(torch.nn.Module):
+    """
+    Building block for decoder made for the difference predictions 
+    Since differences are not closely linked between states, not best predicted with eigenvalues of matrix
+    Ground state uses one latent representation, while excited states use another 
+    """
+    def __init__(self, ground_dim=8, excited_dim=8, hidden_dim=128, n_energies=3):
+        super().__init__()
+
+        self.n_energies = n_energies
+        self.ground_dim = ground_dim
+        self.excited_dim = excited_dim
+        self.latent_dim = ground_dim + excited_dim
+
+        # Sequentially apply fully connected layers with ELU activation
+
+        self.ground_decoder = torch.nn.Sequential(
+            torch.nn.Linear(ground_dim, hidden_dim),
+            torch.nn.ELU(),
+            torch.nn.Linear(hidden_dim, hidden_dim),
+            torch.nn.ELU(),
+            torch.nn.Linear(hidden_dim, hidden_dim),
+            torch.nn.ELU(),
+            torch.nn.Linear(hidden_dim, hidden_dim),
+            torch.nn.ELU(),
+            torch.nn.Linear(hidden_dim, 1)  
+        )
+
+        self.excited_decoder = torch.nn.Sequential(
+            torch.nn.Linear(excited_dim, hidden_dim),
+            torch.nn.ELU(),
+            torch.nn.Linear(hidden_dim, hidden_dim),
+            torch.nn.ELU(),
+            torch.nn.Linear(hidden_dim, hidden_dim),
+            torch.nn.ELU(),
+            torch.nn.Linear(hidden_dim, hidden_dim),
+            torch.nn.ELU(),
+            torch.nn.Linear(hidden_dim, n_energies-1)  
+        )
+        
+
+    def forward(self, z):
+        ground_diff = self.ground_decoder(z[:, :self.ground_dim])
+        excited_diff = self.excited_decoder(z[:, self.ground_dim:])
+
+        return torch.cat(
+            [ground_diff, excited_diff],
+            dim=-1
+        )
