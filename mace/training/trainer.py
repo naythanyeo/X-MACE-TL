@@ -46,6 +46,8 @@ class Trainer:
     stopping_patience: int = 2048
     restore_best: bool = True
 
+    gradient_accumulation_steps: int = 1
+
     def __post_init__(self) -> None:
         if self.max_epochs < 1:
             raise ValueError("max_epochs must be at least 1.")
@@ -63,6 +65,8 @@ class Trainer:
             raise ValueError(
                 "stopping_patience must be at least 1 when early stopping is enabled."
             )
+        if self.gradient_accumulation_steps < 1:
+            raise ValueError("gradient_accumulation_steps must be at least 1")
 
         self.device = torch.device(self.device)
 
@@ -113,19 +117,10 @@ class Trainer:
         patience_counter = 0
 
         for epoch in range(1, self.max_epochs + 1):
-            current_lrs = {
-                group["name"]: group["lr"]
-                for group in optimiser.param_groups
-            }
-            category_lrs = {
-                "gnn": current_lrs.get("gnn_no_decay", current_lrs.get("gnn_decay")),
-                "base_head": current_lrs.get(
-                    "base_head_no_decay", current_lrs.get("base_head_decay")
-                ),
-                "new_head": current_lrs.get(
-                    "new_head_no_decay", current_lrs.get("new_head_decay")
-                ),
-            }
+
+            # Save the GNN base LR 
+            current_lr = optimiser.param_groups[0]["lr"]
+            
             train_metrics = self._run_epoch(
                 model, train_loader, optimiser, loss_fn, training=True, ema=ema
             )
@@ -161,25 +156,18 @@ class Trainer:
             history["valid_loss_breakdown"].append(
                 valid_metrics.get("loss_breakdown", {})
             )
-            history["learning_rate"].append(category_lrs["gnn"])
-            history["learning_rates"].append(current_lrs)
+            history["learning_rate"].append(current_lr)
 
             # Update the optimiser learning rate for the next epoch
             scheduler.step(valid_loss)
 
             # Can toggle this to kill output
             if self.verbose:
-                active_lrs = " | ".join(
-                    f"{name}_lr={value:.2e}"
-                    for name, value in category_lrs.items()
-                    if value is not None
-                )
                 print(
                     f"Epoch {epoch:03d} | train_loss={train_loss:.6f} | "
                     f"valid_loss={valid_loss:.6f} | "
                     f"energy_mae={valid_metrics['energy_mae']:.6f} | "
                     f"force_mae={valid_metrics['force_mae']:.6f} | "
-                    f"{active_lrs}"
                 )
 
             # Only break if early stopping is true
@@ -209,7 +197,7 @@ class Trainer:
         model.train(training)
         total_loss = 0.0
         num_batches = 0
-        breakdown_totals = {}
+        loss_breakdown = {}
         energy_absolute_error = None
         force_absolute_error = None
         energy_count = 0
@@ -218,21 +206,12 @@ class Trainer:
         base_model = model.module if hasattr(model, "module") else model
         prepare_outputs = getattr(base_model, "prepare_loss_outputs", None)
 
-        for batch in data_loader:
-            """
-            TBC for future multihead data loading then batch will contain additional
-            labels that indicate which head it uses
+        if training:
+            optimiser.zero_grad(set_to_none=True)
 
-            model and loss function will read the head label and then run the forward 
-            or calculate weighted loss based on that 
-
-            Trainer remains generic
-            """
+        for batch_index, batch in enumerate(data_loader):
             batch = batch.to(self.device)
             batch_dict = batch.to_dict()
-
-            if training:
-                optimiser.zero_grad(set_to_none=True)
 
             output = model(batch_dict, training=training)
             """
@@ -252,7 +231,7 @@ class Trainer:
                 for name, value in breakdown.items():
                     if value is not None:
                         key = f"{head}_{name}"
-                        breakdown_totals[key] = breakdown_totals.get(key, 0.0) + (
+                        loss_breakdown[key] = loss_breakdown.get(key, 0.0) + (
                             value.detach().item()
                         )
 
@@ -277,16 +256,28 @@ class Trainer:
                 force_count += force_error.numel()
 
             if training:
-                loss.backward()
-                # Gradient clipping 
-                if self.max_grad_norm is not None:
-                    torch.nn.utils.clip_grad_norm_(
-                        model.parameters(), max_norm=self.max_grad_norm
-                    )
-                optimiser.step()
-                # Update the EMA weights after the optimiser step if EMA is enabled
-                if ema is not None:
-                    ema.update()
+                scaled_loss = loss / self.gradient_accumulation_steps
+                scaled_loss.backward()
+
+                should_step = (
+                    (batch_index + 1) % self.gradient_accumulation_steps == 0 or
+                    batch_index == (len(data_loader) - 1)
+                )
+
+                # Only step every other steps
+                if should_step:
+                    # Gradient clipping 
+                    if self.max_grad_norm is not None:
+                        torch.nn.utils.clip_grad_norm_(
+                            model.parameters(), max_norm=self.max_grad_norm
+                        )
+                    optimiser.step()
+                    # Update the EMA weights after the optimiser step if EMA is enabled
+                    if ema is not None:
+                        ema.update()
+
+                    # Reset gradients to None
+                    optimiser.zero_grad(set_to_none=True)
 
             total_loss += loss.detach().item()
             num_batches += 1
@@ -295,8 +286,8 @@ class Trainer:
             raise ValueError("DataLoader is empty.")
 
         metrics = {"loss": total_loss / num_batches}
-        if breakdown_totals:
-            metrics["loss_breakdown"] = breakdown_totals
+        if loss_breakdown:
+            metrics["loss_breakdown"] = loss_breakdown
         if test:
             metrics["energy_mae"] = energy_absolute_error.item() / energy_count
             metrics["force_mae"] = force_absolute_error.item() / force_count

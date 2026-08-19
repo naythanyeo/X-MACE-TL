@@ -11,6 +11,7 @@ __iter__ will be accessed by dataloader
 import random
 
 from dataclasses import dataclass
+from collections import defaultdict
 from typing import Iterator, List, Optional, Sequence
 
 from .atomic_data import AtomicData
@@ -36,14 +37,14 @@ class HeadBatchSampler:
             self.indices_by_head.setdefault(head_index, []).append(dataset_index)
 
     def __iter__(self) -> Iterator[List[int]]:
-        batches = []
+        batches_by_head = defaultdict(list)
         samples_per_head = None
         if self.balance_heads:
             samples_per_head = min(
                 len(indices) for indices in self.indices_by_head.values()
             )
 
-        for head_indices in self.indices_by_head.values():
+        for head, head_indices in self.indices_by_head.items():
             indices = head_indices.copy()
 
             if self.shuffle:
@@ -52,9 +53,19 @@ class HeadBatchSampler:
                 indices = indices[:samples_per_head]
 
             for start in range(0, len(indices), self.batch_size):
-                batches.append(indices[start:start + self.batch_size])
+                batches_by_head[head].append(indices[start:start + self.batch_size])
 
-        if self.shuffle:
-            self._rng.shuffle(batches)
+            # Each head itself shuffle the batches
+            if self.shuffle:
+                self._rng.shuffle(batches_by_head[head])
 
-        yield from batches
+        for batch_group in zip(*batches_by_head.values()):
+            for batch in batch_group:
+                yield batch
+
+    def __len__(self) -> int:
+        batches_per_head = min(
+            (len(indices) + self.batch_size - 1) // self.batch_size
+            for indices in self.indices_by_head.values()
+        )
+        return len(self.indices_by_head) * batches_per_head
