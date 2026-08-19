@@ -184,10 +184,12 @@ class MultiHeadCorrectionStrategy:
 
         # Fill in the learning rates
         for module in transfer_model.autoencoder_heads[0].modules():
-            module.lr_multiplier.fill_(self.base_head_lr)
+            if hasattr(module, "lr_multiplier"):
+                module.lr_multiplier.fill_(self.base_head_lr)
         for i in range(1, self.num_heads):
             for module in transfer_model.autoencoder_heads[i].modules():
-                module.lr_multiplier.fill_(self.correction_head_lr)
+                if hasattr(module, "lr_multiplier"):
+                    module.lr_multiplier.fill_(self.correction_head_lr)
 
         # Replace the e0s with the new metadata e0s
         # Preserve dtype and device
