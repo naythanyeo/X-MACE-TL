@@ -30,9 +30,11 @@ def build_optimiser(
 
     # Iterate through all the modules including child modules
     for module_name, module in model.named_modules():
-        effective_lr = lr * module.lr_multiplier.item()
+        multiplier = getattr(module, "lr_multiplier", None)
+        effective_lr = lr * multiplier.item() if multiplier is not None else lr
+        
         for parameter_name, parameter in module.named_parameters(recurse=False):
-            if not parameter.requires_grad:
+            if not parameter.requires_grad or effective_lr == 0:
                 continue
             # Gives the full name including the module class at the start even when iterating through module
             full_name = (

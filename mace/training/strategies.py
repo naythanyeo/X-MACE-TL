@@ -68,6 +68,11 @@ def _initialise_decoder_output(
 
 
 def _initialise_correction_head(head: torch.nn.Module) -> None:
+    """
+    Helper to initialise the correction head instead of just deep copying it
+    Makes it such that the initial outputs are almost 0 so the model starts closer 
+    to the actual values. Else the initial input will be almost double the errors
+    """
     _reset_module_parameters(head)
     _initialise_decoder_output(head.perm_decoder)
 
@@ -138,9 +143,13 @@ class MultiHeadCorrectionStrategy:
     """
     Duplicate a trained autoencoder head for multi-head training.
     This trainer assumes a route with routed data rather than separated training
+    GNN Lr is taken to be the base LR for all
+    Base and correction head LR are relative to the GNN LR
     """
 
     metadata: AtomDataMetadata
+    base_head_lr: float = 0.1
+    correction_head_lr: float = 10
 
     def __post_init__(self) -> None:
         if self.metadata.num_heads < 2:
@@ -171,7 +180,14 @@ class MultiHeadCorrectionStrategy:
 
         transfer_model.autoencoder_heads = torch.nn.ModuleList(
             [template_head] + correction_heads
-        )
+        )   
+
+        # Fill in the learning rates
+        for module in transfer_model.autoencoder_heads[0].modules():
+            module.lr_multiplier.fill_(self.base_head_lr)
+        for i in range(1, self.num_heads):
+            for module in transfer_model.autoencoder_heads[i].modules():
+                module.lr_multiplier.fill_(self.correction_head_lr)
 
         # Replace the e0s with the new metadata e0s
         # Preserve dtype and device
