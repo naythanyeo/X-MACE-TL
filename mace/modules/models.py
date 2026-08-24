@@ -926,6 +926,12 @@ class AutoencoderExcitedMACE(torch.nn.Module):
 
         self.autoencoder_heads = torch.nn.ModuleList([autoencoder_head])
 
+        self.register_buffer(
+            "lr_multipliers",
+            torch.ones(2),
+            persistent=False
+        )
+
     def prepare_loss_outputs(
         self,
         batch: Dict[str, torch.Tensor],

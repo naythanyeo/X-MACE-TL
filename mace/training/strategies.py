@@ -7,7 +7,7 @@ with the implemented strategies. Eg frozen layers etc
 
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import Tuple
+from typing import Dict, Tuple, Optional
 
 import torch
 from e3nn import o3
@@ -75,11 +75,6 @@ def _initialise_correction_head(head: torch.nn.Module) -> None:
         )
         _zero_module_parameters(output_layer)
 
-def _set_lr_multiplier(module, multiplier):
-    for child in module.modules():
-        if hasattr(child, "lr_multiplier"):
-            child.lr_multiplier.fill_(multiplier)
-
 @dataclass
 class NaiveStrategy:
     """
@@ -135,8 +130,7 @@ class MultiHeadCorrectionStrategy:
 
     metadata: AtomDataMetadata
     gnn_lr: float = 0.01
-    base_head_lr: float = 0.01
-    correction_head_lr: float = 1
+    head_multipliers: Optional[Dict[str, float]] = None
 
     def __post_init__(self) -> None:
         if self.metadata.num_heads < 2:
@@ -149,6 +143,21 @@ class MultiHeadCorrectionStrategy:
             )
 
         self.num_heads = self.metadata.num_heads
+
+        # Build the LR head vector 
+        if self.head_multipliers is None: 
+            # By default first head is 0.01 LR, the rest are 1 
+            self._head_lr_vector = [0.01] + [1] * (self.num_heads - 1)
+        else:
+            # First check that the lr multiplier keys are the same as those in metadata
+            if set(self.head_multipliers) != set(self.metadat.head_to_index):
+                raise ValueError("head_multipliers must have the same head keys as metadata head to index")
+
+            # Then define the vector in head lr based on the head to index order
+            self._head_lr_vector = [
+                float(self.head_multipliers[head_name])
+                for head_name in self.metadata.head_to_index
+            ]
 
     def apply(self, model: torch.nn.Module) -> torch.nn.Module:
         transfer_model = _copy_model(model)
@@ -181,30 +190,21 @@ class MultiHeadCorrectionStrategy:
             [template_head] + correction_heads
         )   
 
-        # Modify the modles LR with helper function 
-        # First all the GNN blocks (nodes, interactions, products)
-        _set_lr_multiplier(
-            transfer_model.node_embedding,
-            self.gnn_lr,
+        # Freeze the autoencoder heads based on LR 
+        for head, multiplier in zip(
+            transfer_model.autoencoder_heads,
+            self._head_lr_vector
+        ):
+            # Check if the multiplier has LR of 0, if so then make require gradients false
+            if multiplier == 0.0:
+                for parameter in head.parameters():
+                    parameter.requires_grad = False
+
+        # Re-register the buffer attribute for the updated learning rates 
+        # This will be read by the optimiser constructor later on
+        transfer_model.lr_multipliers = transfer_model.lr_multipliers.new_tensor(
+            [self.gnn_lr, *self._head_lr_vector]
         )
-
-        for interaction in transfer_model.interactions:
-            _set_lr_multiplier(interaction, self.gnn_lr)
-
-        for product in transfer_model.products:
-            _set_lr_multiplier(product, self.gnn_lr)
-
-        # Then set LR for the base and correction heads
-        _set_lr_multiplier(
-            transfer_model.autoencoder_heads[0],
-            self.base_head_lr,
-        )
-
-        for correction_head in transfer_model.autoencoder_heads[1:]:
-            _set_lr_multiplier(
-                correction_head,
-                self.correction_head_lr,
-            )
 
         # Replace the e0s with the new metadata e0s
         # Preserve dtype and device
