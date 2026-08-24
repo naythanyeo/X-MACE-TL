@@ -73,7 +73,8 @@ class Trainer:
         model: torch.nn.Module,
         train_loader: DataLoader,
         valid_loader: DataLoader,
-        loss_fn: torch.nn.Module
+        loss_fn: torch.nn.Module,
+        checkpoint_epoch: Optional[int] = None,
     ):
         """
         Main trainer loop that controls the overall training like early stopping
@@ -82,6 +83,13 @@ class Trainer:
         Learning rate scheduler and ema also controlled here 
         For ema, the validation context is defined and used during validation mode
         """
+        if checkpoint_epoch is not None and (
+            isinstance(checkpoint_epoch, bool)
+            or not isinstance(checkpoint_epoch, int)
+            or checkpoint_epoch < 1
+        ):
+            raise ValueError("checkpoint_epoch must be a positive integer or None.")
+
         model.to(self.device)
         optimiser = build_optimiser(
             model,
@@ -104,7 +112,8 @@ class Trainer:
             "valid_loss": [],
             "valid_energy_mae": [],
             "valid_force_mae": [],
-            "learning_rate": []
+            "learning_rate": [],
+            "checkpoint_models": [],
         }
         best_state = None
         best_epoch = 0
@@ -136,6 +145,9 @@ class Trainer:
                     patience_counter = 0
                 else:
                     patience_counter += 1
+
+                if checkpoint_epoch is not None and epoch % checkpoint_epoch == 0:
+                    history["checkpoint_models"].append(deepcopy(model.state_dict()))
 
             history["epoch"].append(epoch)
             history["train_loss"].append(train_loss)
