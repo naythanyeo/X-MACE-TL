@@ -150,7 +150,7 @@ class MultiHeadCorrectionStrategy:
             self._head_lr_vector = [0.01] + [1] * (self.num_heads - 1)
         else:
             # First check that the lr multiplier keys are the same as those in metadata
-            if set(self.head_multipliers) != set(self.metadat.head_to_index):
+            if set(self.head_multipliers) != set(self.metadata.head_to_index):
                 raise ValueError("head_multipliers must have the same head keys as metadata head to index")
 
             # Then define the vector in head lr based on the head to index order
@@ -177,11 +177,6 @@ class MultiHeadCorrectionStrategy:
                                                              excited_dim=8, 
                                                              hidden_dim=128, 
                                                              n_energies=3)
-            for module in correction_head.perm_decoder.modules():
-                module.register_buffer(
-                    "lr_multiplier",
-                    torch.tensor(1.0)
-                )
             _initialise_correction_head(correction_head)
             correction_heads.append(correction_head)
             
@@ -238,6 +233,8 @@ class MultiHeadStrategy:
     """
 
     metadata: AtomDataMetadata
+    gnn_lr: float = 0.01
+    head_multipliers: Optional[Dict[str, float]] = None
 
     def __post_init__(self) -> None:
         if self.metadata.num_heads < 2:
@@ -250,6 +247,19 @@ class MultiHeadStrategy:
             )
 
         self.num_heads = self.metadata.num_heads
+
+        if self.head_multipliers is None:
+            self._head_lr_vector = [0.01] + [1.0] * (self.num_heads - 1)
+        else:
+            if set(self.head_multipliers) != set(self.metadata.head_to_index):
+                raise ValueError(
+                    "head_multipliers must have the same head keys as metadata head to index"
+                )
+
+            self._head_lr_vector = [
+                float(self.head_multipliers[head_name])
+                for head_name in self.metadata.head_to_index
+            ]
 
     def apply(self, model: torch.nn.Module) -> torch.nn.Module:
         transfer_model = _copy_model(model)
@@ -264,6 +274,18 @@ class MultiHeadStrategy:
         transfer_model.autoencoder_heads = torch.nn.ModuleList(
             [template_head]
             + [deepcopy(template_head) for _ in range(self.num_heads - 1)]
+        )
+
+        for head, multiplier in zip(
+            transfer_model.autoencoder_heads,
+            self._head_lr_vector,
+        ):
+            if multiplier == 0.0:
+                for parameter in head.parameters():
+                    parameter.requires_grad_(False)
+
+        transfer_model.lr_multipliers = transfer_model.lr_multipliers.new_tensor(
+            [self.gnn_lr, *self._head_lr_vector]
         )
 
         # Replace the e0s with the new metadata e0s

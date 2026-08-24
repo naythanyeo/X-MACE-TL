@@ -26,12 +26,38 @@ def build_optimiser(
     weight_decay: float = 5e-7,
 ) -> torch.optim.Adam:
 
+    # First build all the multiplier terms for the learning rate 
+    # Currently info is being stored in a vector model.lr_multipliers such that
+    # [gnn_lr, head0_lr, head1_lr ...]
+    # Later on for every module and parameter, a parameter_groups dict is built to specified
+    # details like the decay and LR. So we first build a dictionary that relates this index
+    # vector to the exact module names that can be accesssed later
+
+    module_multipliers = {}
+
+    for module_name, _ in model.named_modules():
+        # If the module is part of the head, then module name will start with autoencoder_heads
+        # This will be starting from index 1 onwards 
+        if module_name.startswith("autoencoder_heads."):
+            # Get the index of which head it belongs to 
+            # The autoencoder head index will be after the first "."
+            head_index = int(module_name.split(".")[1])
+            multiplier = float(
+                model.lr_multipliers[head_index+1].item() # First index is the GNN so +1 
+            )
+        else:
+            # If not this is the graph layer, we follow the LR of the first term
+            multiplier = float(
+                model.lr_multipliers[0].item()
+            )
+        # Now add in the multipliers to the module_multiplier dictionary with module names as keys
+        module_multipliers[module_name] = multiplier
+
     parameter_groups = {}
 
-    # Iterate through all the modules including child modules
     for module_name, module in model.named_modules():
-        multiplier = getattr(module, "lr_multiplier", None)
-        effective_lr = lr * multiplier.item() if multiplier is not None else lr
+        multiplier = module_multipliers[module_name]
+        effective_lr = lr * multiplier
         
         for parameter_name, parameter in module.named_parameters(recurse=False):
             if not parameter.requires_grad or effective_lr == 0:
