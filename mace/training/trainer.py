@@ -4,6 +4,7 @@ from contextlib import nullcontext
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import Optional, Union
+from pathlib import Path
 
 import torch
 from torch.optim.lr_scheduler import ReduceLROnPlateau
@@ -48,6 +49,9 @@ class Trainer:
 
     gradient_accumulation_steps: int = 1
 
+    checkpoint_dir: str = None
+    checkpoint_interval: int = 5
+
     def __post_init__(self) -> None:
         if self.max_epochs < 1:
             raise ValueError("max_epochs must be at least 1.")
@@ -67,6 +71,12 @@ class Trainer:
             )
         if self.gradient_accumulation_steps < 1:
             raise ValueError("gradient_accumulation_steps must be at least 1")
+
+        # If checkpoints are specified, validate and create parent dir
+        if self.checkpoint_dir is not None:
+            if self.checkpoint_interval <= 0:
+                raise ValueError("checkpoint_interval must be position")
+            Path(self.checkpoint_dir).mkdir(parents=True, exist_ok=True)
 
         self.device = torch.device(self.device)
 
@@ -144,6 +154,12 @@ class Trainer:
                     patience_counter = 0
                 else:
                     patience_counter += 1
+
+                # Save checkpoints
+                if self.checkpoint_dir is not None:
+                    if epoch % self.checkpoint_interval == 0:
+                        model_path = Path(self.checkpoint_dir) / f"model_epoch{epoch}.pt"
+                        torch.save(model.state_dict(), model_path)
 
             history["epoch"].append(epoch)
             history["train_loss"].append(train_loss)
