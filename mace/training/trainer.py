@@ -189,7 +189,8 @@ class Trainer:
         data_loader: DataLoader,
         loss_fn: torch.nn.Module,
         k: int = 5,
-        seed: int = 42
+        seed: int = 42,
+        checkpoint_epoch: Optional[int] = None,
     ):
         """
         Train k independent model copies using k-fold cross-validation.
@@ -212,7 +213,8 @@ class Trainer:
                 fold_model,
                 train_loader,
                 valid_loader,
-                loss_fn
+                loss_fn,
+                checkpoint_epoch=checkpoint_epoch,
             )
 
             model_key = f"model_{fold}"
