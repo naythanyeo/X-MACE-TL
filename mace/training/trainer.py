@@ -3,6 +3,7 @@
 from contextlib import nullcontext
 from copy import deepcopy
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional, Union
 
 import torch
@@ -76,6 +77,7 @@ class Trainer:
         valid_loader: DataLoader,
         loss_fn: torch.nn.Module,
         checkpoint_epoch: Optional[int] = None,
+        checkpoint_models_dir=None,
     ):
         """
         Main trainer loop that controls the overall training like early stopping
@@ -90,6 +92,19 @@ class Trainer:
             or checkpoint_epoch < 1
         ):
             raise ValueError("checkpoint_epoch must be a positive integer or None.")
+
+        if checkpoint_epoch is not None:
+            if checkpoint_models_dir is None:
+                raise ValueError(
+                    "checkpoint_models_dir is required when checkpoint_epoch is set."
+                )
+            checkpoint_models_dir = Path(checkpoint_models_dir).expanduser().resolve()
+            if checkpoint_models_dir.exists() and not checkpoint_models_dir.is_dir():
+                raise NotADirectoryError(checkpoint_models_dir)
+            checkpoint_models_dir.mkdir(
+                parents=True,
+                exist_ok=True,
+            )
 
         model.to(self.device)
         optimiser = build_optimiser(
@@ -148,14 +163,32 @@ class Trainer:
                     patience_counter += 1
 
                 if checkpoint_epoch is not None and epoch % checkpoint_epoch == 0:
+                    checkpoint_path = (
+                        checkpoint_models_dir
+                        / f"checkpoint_epoch_{epoch:06d}.pt"
+                    )
+                    if checkpoint_path.exists():
+                        raise FileExistsError(checkpoint_path)
+
                     if has_lora_layers(model):
                         checkpoint_model = merge_lora_weights(model, inplace=False)
-                        checkpoint_state = deepcopy(checkpoint_model.state_dict())
+                        torch.save(
+                            checkpoint_model.state_dict(),
+                            checkpoint_path,
+                        )
                         del checkpoint_model
                     else:
-                        checkpoint_state = deepcopy(model.state_dict())
+                        torch.save(
+                            model.state_dict(),
+                            checkpoint_path,
+                        )
 
-                    history["checkpoint_models"].append(checkpoint_state)
+                    history["checkpoint_models"].append(
+                        {
+                            "epoch": epoch,
+                            "path": str(checkpoint_path.resolve()),
+                        }
+                    )
 
             history["epoch"].append(epoch)
             history["train_loss"].append(train_loss)
@@ -202,6 +235,7 @@ class Trainer:
         k: int = 5,
         seed: int = 42,
         checkpoint_epoch: Optional[int] = None,
+        checkpoint_models_dir=None,
     ):
         """
         Train k independent model copies using k-fold cross-validation.
@@ -220,12 +254,21 @@ class Trainer:
                 print(f"Fold {fold}/{k}")
             # Create a copy of the model to train
             fold_model = deepcopy(model).to(self.device)
+            fold_checkpoint_dir = None
+            if checkpoint_epoch is not None:
+                fold_checkpoint_dir = (
+                    Path(checkpoint_models_dir)
+                    .expanduser()
+                    .resolve()
+                    / f"fold_{fold:02d}"
+                )
             fold_model, fold_history = self.train_model(
                 fold_model,
                 train_loader,
                 valid_loader,
                 loss_fn,
                 checkpoint_epoch=checkpoint_epoch,
+                checkpoint_models_dir=fold_checkpoint_dir,
             )
 
             model_key = f"model_{fold}"
