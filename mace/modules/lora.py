@@ -293,6 +293,20 @@ def inject_LoRAs(model: nn.Module, rank: int = 4, alpha: int = 1):
     return model
 
 
+def has_lora_layers(model: nn.Module) -> bool:
+    return any(
+        isinstance(
+            module,
+            (
+                LoRAO3Linear,
+                LoRADenseLinear,
+                LoRAFCLayer,
+            ),
+        )
+        for module in model.modules()
+    )
+
+
 def merge_lora_weights(model: nn.Module, inplace: bool = True) -> nn.Module:
     """
     Merge LoRA weights into base weights and replace LoRA wrappers with merged base modules.

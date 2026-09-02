@@ -11,6 +11,7 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.utils.data import Subset
 from torch_ema import ExponentialMovingAverage
 
+from mace.modules.lora import has_lora_layers, merge_lora_weights
 from mace.tools.torch_geometric import DataLoader
 
 from .optimiser import build_optimiser
@@ -147,7 +148,14 @@ class Trainer:
                     patience_counter += 1
 
                 if checkpoint_epoch is not None and epoch % checkpoint_epoch == 0:
-                    history["checkpoint_models"].append(deepcopy(model.state_dict()))
+                    if has_lora_layers(model):
+                        checkpoint_model = merge_lora_weights(model, inplace=False)
+                        checkpoint_state = deepcopy(checkpoint_model.state_dict())
+                        del checkpoint_model
+                    else:
+                        checkpoint_state = deepcopy(model.state_dict())
+
+                    history["checkpoint_models"].append(checkpoint_state)
 
             history["epoch"].append(epoch)
             history["train_loss"].append(train_loss)
@@ -176,6 +184,9 @@ class Trainer:
         # If restore best, then go back to lowest validation loss state
         if self.restore_best and best_state is not None:
             model.load_state_dict(best_state)
+
+        if has_lora_layers(model):
+            model = merge_lora_weights(model, inplace=True)
 
         history["best_epoch"] = best_epoch
         history["best_valid_loss"] = best_valid_loss
