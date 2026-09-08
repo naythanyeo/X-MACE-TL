@@ -11,6 +11,7 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch_ema import ExponentialMovingAverage
 
 from mace.tools.torch_geometric import DataLoader
+from mace.modules.loss import phase_rmse_loss
 
 from .optimiser import build_optimiser
 
@@ -85,7 +86,8 @@ class Trainer:
         model: torch.nn.Module,
         train_loader: DataLoader,
         valid_loader: DataLoader,
-        loss_fn: torch.nn.Module
+        loss_fn: torch.nn.Module,
+        compute_nacs: bool = False,
     ):
         """
         Main trainer loop that controls the overall training like early stopping
@@ -121,6 +123,9 @@ class Trainer:
             "learning_rate": [],
             "learning_rates": [],
         }
+        if compute_nacs:
+            history["valid_nac_phase_rmse"] = []
+            history["valid_nac_abs_mae"] = []
         best_state = None
         best_epoch = 0
         best_valid_loss = float("inf")
@@ -132,7 +137,7 @@ class Trainer:
             current_lr = optimiser.param_groups[0]["lr"]
             
             train_metrics = self._run_epoch(
-                model, train_loader, optimiser, loss_fn, training=True, ema=ema
+                model, train_loader, optimiser, loss_fn, training=True, ema=ema, compute_nacs=compute_nacs
             )
             train_loss = train_metrics["loss"]
 
@@ -142,7 +147,7 @@ class Trainer:
             )
             with validation_context:
                 valid_metrics = self._run_epoch(
-                    model, valid_loader, optimiser, loss_fn, training=False, test=True
+                    model, valid_loader, optimiser, loss_fn, training=False, test=True, compute_nacs=compute_nacs
                 )
                 valid_loss = valid_metrics["loss"]
 
@@ -166,6 +171,11 @@ class Trainer:
             history["valid_loss"].append(valid_loss)
             history["valid_energy_mae"].append(valid_metrics["energy_mae"])
             history["valid_force_mae"].append(valid_metrics["force_mae"])
+            if compute_nacs:
+                history["valid_nac_phase_rmse"].append(
+                    valid_metrics["nac_phase_rmse"]
+                )
+                history["valid_nac_abs_mae"].append(valid_metrics["nac_abs_mae"])
             history["train_loss_breakdown"].append(
                 train_metrics.get("loss_breakdown", {})
             )
@@ -179,12 +189,18 @@ class Trainer:
 
             # Can toggle this to kill output
             if self.verbose:
-                print(
+                message = (
                     f"Epoch {epoch:03d} | train_loss={train_loss:.6f} | "
                     f"valid_loss={valid_loss:.6f} | "
                     f"energy_mae={valid_metrics['energy_mae']:.6f} | "
-                    f"force_mae={valid_metrics['force_mae']:.6f} | "
+                    f"force_mae={valid_metrics['force_mae']:.6f}"
                 )
+                if compute_nacs:
+                    message += (
+                        f" | nac_phase_rmse={valid_metrics['nac_phase_rmse']:.6f}"
+                        f" | nac_abs_mae={valid_metrics['nac_abs_mae']:.6f}"
+                    )
+                print(message)
 
             # Only break if early stopping is true
             if self.early_stopping and patience_counter >= self.stopping_patience:
@@ -208,7 +224,8 @@ class Trainer:
         loss_fn: torch.nn.Module,
         training: bool, # Training vs Validation Mode
         test: bool = False,
-        ema: Optional[ExponentialMovingAverage] = None
+        ema: Optional[ExponentialMovingAverage] = None,
+        compute_nacs: bool = False
     ) -> dict:
         model.train(training)
         total_loss = 0.0
@@ -218,6 +235,10 @@ class Trainer:
         force_absolute_error = None
         energy_count = 0
         force_count = 0
+        nac_phase_rmse_total = 0.0
+        nac_phase_batch_count = 0
+        nac_abs_error_total = 0.0
+        nac_raw_component_count = 0
 
         base_model = model.module if hasattr(model, "module") else model
         prepare_outputs = getattr(base_model, "prepare_loss_outputs", None)
@@ -271,6 +292,15 @@ class Trainer:
                 energy_count += energy_error.numel()
                 force_count += force_error.numel()
 
+                if compute_nacs:
+                    nac_phase_rmse = phase_rmse_loss(batch, output)
+                    nac_abs_error = torch.abs(output["nacs"] - batch["nacs"])
+
+                    nac_phase_rmse_total += nac_phase_rmse.detach().item()
+                    nac_phase_batch_count += 1
+                    nac_abs_error_total += nac_abs_error.detach().sum().item()
+                    nac_raw_component_count += nac_abs_error.numel()
+
             if training:
                 scaled_loss = loss / self.gradient_accumulation_steps
                 scaled_loss.backward()
@@ -307,5 +337,13 @@ class Trainer:
         if test:
             metrics["energy_mae"] = energy_absolute_error.item() / energy_count
             metrics["force_mae"] = force_absolute_error.item() / force_count
+            if compute_nacs:
+                metrics["nac_phase_rmse"] = (
+                    nac_phase_rmse_total / nac_phase_batch_count
+                )
+                metrics["nac_abs_mae"] = (
+                    nac_abs_error_total / nac_raw_component_count
+                )
+
 
         return metrics
