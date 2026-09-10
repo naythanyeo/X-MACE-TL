@@ -72,12 +72,6 @@ class Trainer:
         if self.gradient_accumulation_steps < 1:
             raise ValueError("gradient_accumulation_steps must be at least 1")
 
-        # If checkpoints are specified, validate and create parent dir
-        if self.checkpoint_dir is not None:
-            if self.checkpoint_interval <= 0:
-                raise ValueError("checkpoint_interval must be position")
-            Path(self.checkpoint_dir).mkdir(parents=True, exist_ok=True)
-
         self.device = torch.device(self.device)
 
     def train_model(
