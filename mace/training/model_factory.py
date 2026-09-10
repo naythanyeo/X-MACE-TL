@@ -133,6 +133,8 @@ def _validate_parameters(
 def initialise_autoencoder(
     metadata: AtomDataMetadata,
     preset: str = "default_ani",
+    compute_nacs: bool = False,
+    nac_num: int = 0,
     latent_dim: Optional[int] = None,
     num_bessel: Optional[int] = None,
     num_polynomial_cutoff: Optional[int] = None,
@@ -188,10 +190,10 @@ def initialise_autoencoder(
         num_polynomial_cutoff=settings["num_polynomial_cutoff"],
         num_permutational_invariant=settings["latent_dim"],
         n_energies=metadata.n_energies,
-        compute_nacs=False,
+        compute_nacs=compute_nacs,
         compute_socs=False,
         soc_num=0,
-        nac_num=0,
+        nac_num=nac_num,
         max_ell=settings["max_ell"],
         interaction_cls=modules.interaction_classes[settings["interaction"]],
         interaction_cls_first=modules.interaction_classes[
@@ -247,4 +249,5 @@ def initialise_autoencoder(
             device=og_device,
             dtype=og_dtype
         )
+
     return model

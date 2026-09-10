@@ -18,7 +18,7 @@ def mean_squared_error_invariants(ref: Batch, pred: TensorDict) -> torch.Tensor:
     return torch.mean(torch.square((pred["encoded_energy"] - pred["invariant_vals"])))
 
 def reconstruction_error_invariants(ref: Batch, pred: TensorDict) -> torch.Tensor:
-    return torch.mean(torch.square(ref["energy"] - pred["decoded_energy"]))
+    return torch.mean(torch.square(ref["centered_energy_difference"] - pred["centered_decoded_energy"]))
 
 def weighted_mean_squared_error_energy(ref: Batch, pred: TensorDict) -> torch.Tensor:
     # energy: [n_graphs, ]
@@ -481,21 +481,49 @@ class InvariantsWeightedEnergyForcesNacsDipoleLoss(torch.nn.Module):
 
     def forward(self, ref: Batch, pred: TensorDict) -> torch.Tensor:
         loss = 0
-
         if ref["energy"].shape == pred["energy"].shape:
+            pred_energy_loss = mean_squared_error_energy(ref, pred)
+            reconstructed_energy_loss = reconstruction_error_invariants(ref, pred)
+            latent_space_alignment_loss = mean_squared_error_invariants(ref, pred)
             loss = self.energy_weight * (mean_squared_error_energy(ref, pred) + reconstruction_error_invariants(ref, pred) + mean_squared_error_invariants(ref, pred))
+        else:
+            pred_energy_loss, reconstructed_energy_loss, latent_space_alignment_loss = None, None, None
         
         if ref["forces"].shape == pred["forces"].shape:
+            forces_loss = mean_squared_error_forces(ref, pred)
             loss += self.forces_weight * mean_squared_error_forces(ref, pred)
+        else:
+            forces_loss = None
 
         if ref["nacs"].shape == pred["nacs"].shape:
+          nacs_loss = phase_rmse_loss(ref, pred)
           loss += self.nacs_weight * phase_rmse_loss(ref, pred)
+        else:
+            nacs_loss = None
 
         if ref["dipoles"].shape == pred["dipoles"].shape:
+          dipole_loss = weighted_mean_squared_error_dipole(ref, pred) * 100
           loss += self.dipoles_weight * weighted_mean_squared_error_dipole(ref, pred) * 100
+        else:
+            dipole_loss = None
 
         if ref["socs"].shape == pred["socs"].shape:
+            socs_loss = phase_rmse_socs(ref, pred)
             loss += self.socs_weight * phase_rmse_socs(ref, pred)
+        else:
+            socs_loss = None
+        
+        loss_breakdown = {
+            "pred_energy_loss": pred_energy_loss,
+            "reconstructed_energy_loss": reconstructed_energy_loss,
+            "latent_space_alignment_loss": latent_space_alignment_loss,
+            "forces_loss": forces_loss,
+            "nacs_loss": nacs_loss,
+            "dipole_loss": dipole_loss,
+            "socs_loss": socs_loss
+        }
+
+        self.loss_breakdown = loss_breakdown
 
         return loss
 

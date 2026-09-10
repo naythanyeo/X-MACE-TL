@@ -151,6 +151,44 @@ class NonLinearReadoutBlock(torch.nn.Module):
         return self.linear_2(x)  # [n_nodes, 1]
 
 @compile_mode("script")
+class LinearNACReadoutBlock(torch.nn.Module):
+    def __init__(self, irreps_in: o3.Irreps, nac_indices: int):
+        super().__init__()
+        self.linear = o3.Linear(irreps_in=irreps_in,
+                                irreps_out=o3.Irreps(str(int(nac_indices)) + "x1o"))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.linear(x)
+
+
+@compile_mode("script")
+class NonLinearNACReadoutBlock(torch.nn.Module):
+    """
+    Note: this block currently will output 0s because NACs expects vector channels
+    However, the current model builds it such that the final interaction layer only
+    preserves scalar channels. This means that the inputs into the NACs only can recieve
+    scalars, so the NAC vectors cannot be created from the last (or usually second)
+    interactions block.
+    """
+    def __init__(
+        self, irreps_in: o3.Irreps, MLP_irreps: o3.Irreps, gate: Optional[Callable], nac_indices: int
+    ):
+        super().__init__()
+        self.hidden_irreps = MLP_irreps
+        self.linear_1 = o3.Linear(irreps_in=irreps_in,
+                                  irreps_out=self.hidden_irreps)
+        self.non_linearity = nn.Activation(irreps_in=self.hidden_irreps, acts=[gate])
+        self.irreps_in = irreps_in
+        self.linear_2 = o3.Linear(
+            irreps_in=self.hidden_irreps,
+            irreps_out=o3.Irreps(str(int(nac_indices)) + "x1o")
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:  # [n_nodes, irreps]  # [..., ]
+        x = self.non_linearity(self.linear_1(x))
+        return self.linear_2(x)  # [n_nodes, 1]
+
+@compile_mode("script")
 class LinearSocReadoutBlock(torch.nn.Module):
     def __init__(self, irreps_in: o3.Irreps, socs_indices: int):
         super().__init__()
@@ -253,25 +291,35 @@ class NonLinearDipoleReadoutBlock(torch.nn.Module):
 
 @compile_mode("script")
 class AtomicEnergiesBlock(torch.nn.Module):
+    """
+    Currently accept both 1D and 2D array for multiheaded training 
+    Autoencoder default is 2D but other models still use 1D 
+    """
     atomic_energies: torch.Tensor
 
     def __init__(self, atomic_energies: Union[np.ndarray, torch.Tensor]):
         super().__init__()
-        assert len(atomic_energies.shape) == 1
+        # Accept one E0 vector or a matrix of head-specific E0 vectors.
 
         self.register_buffer(
             "atomic_energies",
             torch.tensor(atomic_energies, dtype=torch.get_default_dtype()),
-        )  # [n_elements, ]
+        )  # [n_elements] or [n_heads, n_elements]
 
     def forward(
-        self, x: torch.Tensor  # one-hot of elements [..., n_elements]
+        self,
+        x: torch.Tensor,  # one-hot of elements [..., n_elements]
+        head: Optional[torch.Tensor] = None,  # Head index of the batch
     ) -> torch.Tensor:  # [..., ]
+        if head is not None:
+            return torch.matmul(x, self.atomic_energies[head])
         return torch.matmul(x, self.atomic_energies)
 
     def __repr__(self):
-        formatted_energies = ", ".join([f"{x:.4f}" for x in self.atomic_energies])
-        return f"{self.__class__.__name__}(energies=[{formatted_energies}])"
+        formatted_energies = np.array2string(
+            self.atomic_energies.detach().cpu().numpy(), precision=4
+        )
+        return f"{self.__class__.__name__}(energies={formatted_energies})"
 
 
 @compile_mode("script")
@@ -879,4 +927,138 @@ class ScaleShiftBlock(torch.nn.Module):
     def __repr__(self):
         return (
             f"{self.__class__.__name__}(scale={self.scale:.6f}, shift={self.shift:.6f})"
+        )
+
+@compile_mode("script")
+class AutoencoderHead(torch.nn.Module):
+    """
+    Autoencoder head block that can be duplicated for multiheaded training 
+    Perm_encoder is part of the head, but is not called during forward loop
+    The loss outputs function will access it separately 
+    """
+    def __init__(
+        self, 
+        invariant_readouts,
+        nac_readouts,
+        socs_readouts,
+        perm_encoder,
+        perm_decoder,
+        nac_indices
+    ):
+        super().__init__()
+
+        self.invariant_readouts = invariant_readouts
+        self.nac_readouts = nac_readouts
+        self.socs_readouts = socs_readouts
+        self.perm_encoder = perm_encoder
+        self.perm_decoder = perm_decoder
+        self.nac_indices = nac_indices
+        self.compute_nacs = len(self.nac_readouts) > 0
+        self.compute_socs = len(self.socs_readouts) > 0
+        
+    def forward(
+            self, 
+            node_feats_list: List[torch.Tensor], 
+            batch: torch.Tensor, 
+            num_graphs: int
+        ):
+        invariant_list = []
+        node_nacs_list = []
+        node_socs_list = []
+
+        # Add in the invariant outputs 
+        for index, invariant_readout in enumerate(self.invariant_readouts):
+            node_feats = node_feats_list[index]
+            node_invariant_output = invariant_readout(node_feats) # [num_atoms, 16]
+            graph_invariants = scatter_sum(src=node_invariant_output, index=batch, dim=0, dim_size=num_graphs) # [num_graphs, 16]
+            invariant_list.append(graph_invariants)
+
+        # Add in NAC readouts, if compute NAC is false, it will skip the loop since list is empty
+        for index, nac_readout in enumerate(self.nac_readouts):
+            node_feats = node_feats_list[index]
+            node_nacs = nac_readout(node_feats) # [num_atoms, flattened_representation]
+            node_nacs = node_nacs.reshape(node_nacs.shape[0], self.nac_indices, 3) # [num_atoms, nac_indices, 3(3D vector)] 
+            node_nacs_list.append(node_nacs)
+
+        # Add in SOC readouts, if compute SOC is false, it will skip the loop since list is empty
+        for index, socs_readout in enumerate(self.socs_readouts):
+            node_feats = node_feats_list[index]
+            socs_output = socs_readout(node_feats) # [num_atoms, flattened_representation]
+            graph_socs_output = scatter_sum(src=socs_output, index=batch, dim=0, dim_size=num_graphs) # [num_graphs, soc_indices (1)]
+            node_socs_list.append(graph_socs_output)
+
+        
+        # Now sum all the outputs from both interaction node feats 
+        invariant_contributions = torch.stack(invariant_list, dim=1)
+        invariant_vals = torch.sum(invariant_contributions, dim=1) 
+        # Feed the 16D latent space into the Decoder
+        decoded_energy = self.perm_decoder(invariant_vals)
+
+        # Sum the NACs
+        if self.compute_nacs:
+            nacs_contributions = torch.stack(node_nacs_list, dim=1)
+            total_nacs = torch.sum(nacs_contributions, dim=1)
+        else:
+            # Same device type empty tensor
+            total_nacs = invariant_vals.new_empty((0,))
+
+        # Sum the SOCs
+        if self.compute_socs:
+            socs_contributions = torch.stack(node_socs_list, dim=1)
+            total_socs = torch.sum(socs_contributions, dim=1)
+        else:
+            total_socs = invariant_vals.new_empty((0,))
+
+        return decoded_energy, total_nacs, total_socs, invariant_vals
+
+
+@compile_mode("script")
+class DifferenceDecoder(torch.nn.Module):
+    """
+    Building block for decoder made for the difference predictions 
+    Since differences are not closely linked between states, not best predicted with eigenvalues of matrix
+    Ground state uses one latent representation, while excited states use another 
+    """
+    def __init__(self, ground_dim=8, excited_dim=8, hidden_dim=128, n_energies=3):
+        super().__init__()
+
+        self.n_energies = n_energies
+        self.ground_dim = ground_dim
+        self.excited_dim = excited_dim
+        self.latent_dim = ground_dim + excited_dim
+
+        # Sequentially apply fully connected layers with ELU activation
+
+        self.ground_decoder = torch.nn.Sequential(
+            torch.nn.Linear(ground_dim, hidden_dim),
+            torch.nn.ELU(),
+            torch.nn.Linear(hidden_dim, hidden_dim),
+            torch.nn.ELU(),
+            torch.nn.Linear(hidden_dim, hidden_dim),
+            torch.nn.ELU(),
+            torch.nn.Linear(hidden_dim, hidden_dim),
+            torch.nn.ELU(),
+            torch.nn.Linear(hidden_dim, 1)  
+        )
+
+        self.excited_decoder = torch.nn.Sequential(
+            torch.nn.Linear(excited_dim, hidden_dim),
+            torch.nn.ELU(),
+            torch.nn.Linear(hidden_dim, hidden_dim),
+            torch.nn.ELU(),
+            torch.nn.Linear(hidden_dim, hidden_dim),
+            torch.nn.ELU(),
+            torch.nn.Linear(hidden_dim, hidden_dim),
+            torch.nn.ELU(),
+            torch.nn.Linear(hidden_dim, n_energies-1)  
+        )
+        
+
+    def forward(self, z):
+        ground_diff = self.ground_decoder(z[:, :self.ground_dim])
+        excited_diff = self.excited_decoder(z[:, self.ground_dim:])
+
+        return torch.cat(
+            [ground_diff, excited_diff],
+            dim=-1
         )

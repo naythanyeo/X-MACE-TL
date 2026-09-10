@@ -18,7 +18,7 @@ INPUT:
     - dictionary of atoms objects
 OUTPUT: 
     - dataloader object
-    - metadata accessible through attribute, but stored in class
+    - metadata accessible through get_metadata(), but stored in class
 
 Target API
 atoms_list = ase.io.read(XYZ_FILE, index=f":{N_GEOMETRIES}")
@@ -33,36 +33,45 @@ data_builder = AtomDataLoaderBuilder(cutoff = 5, # Maximum bond length
 train_loader = data_builder.load(train_list)
 valid_loader = data_builder.load(valid_list)
 
-data_metadata = data_builder.metadata
+data_metadata = data_builder.get_metadata()
 
 # Initialised only with new non default parameters + data_metadata
 model = initialise_base_autoencoder(latent=16... , data_metadata)
 """
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Union
 
 import numpy as np
 import torch
 from ase import Atoms
-from ase.data import atomic_numbers
+from ase.data import chemical_symbols
 
 from mace.tools import AtomicNumberTable, get_atomic_number_table_from_zs
 from mace.tools.torch_geometric import DataLoader
 
 from .atomic_data import AtomicData
+from .data_sampler import HeadBatchSampler
 from .utils import compute_average_E0s, config_from_atoms_list
 
 
 @dataclass
 class AtomDataMetadata:
+    """
+    Metadata class that tracks all the info used to initialise a model
+    Primary purpose is to store all these info that model requires for initialisation
+    atomic_energies are stored and given to model as a E0_matrix for different heads
+    """
     z_table: AtomicNumberTable
     atomic_energies: np.ndarray
     r_max: float
     n_energies: int
     avg_num_neighbors: float
+    head_to_index: Dict[str, int]
+    energy_difference_references: Dict[str, Optional[str]]
     atomic_numbers: List[int] = field(init=False)
     num_elements: int = field(init=False)
+    num_heads: int = field(init=False)
 
     def __post_init__(self) -> None:
         """
@@ -70,55 +79,90 @@ class AtomDataMetadata:
         """
         self.atomic_numbers = [int(z) for z in self.z_table.zs]
         self.num_elements = len(self.atomic_numbers)
+        self.num_heads = len(self.head_to_index)
 
 
 @dataclass
 class AtomDataLoaderBuilder:
     """
-    Accepted input forms:
+    Initialise this builder class with deafult parameters
+
+    Later on when creating load, accepted input forms for data:
      - List[Atoms] for ordinary single-head data.
      - Dict[str, List[Atoms]] for labelled multi-head data.
 
-    Initialise this builder class with deafult parameters
+    Energy differences are initialised from the atoms list as raw differences
+    The E0s differences are subtracted based on the references specified
+    energy_difference_references={
+        "casscf": None,
+        "caspt2": "casscf",
+    }
     """
     cutoff: float = 5.0  # Max bond length
     # xyz file labels (ignore nac and socs)
     energy_key: str = "REF_energy"
+    energy_difference_key: str = "REF_raw_energy_differences"
     forces_key: str = "REF_forces"
-    metadata: Optional[AtomDataMetadata] = None
-    E0s: Optional[Dict[str, float]] = None
+    nacs_key: str = "REF_nacs"
+    E0s: Optional[
+        Union[Dict[str, float], Dict[str, Dict[str, float]]]
+    ] = None
+    energy_difference_references: Optional[Dict[str, Optional[str]]] = None
+    _metadata: Optional[AtomDataMetadata] = field(
+        init=False,
+        default=None,
+        repr=False,
+    )
 
     def __post_init__(self) -> None:
         """
         Validate the parameters
-        Metadata provided should be of the metadata object
         """
         if self.cutoff <= 0:
             raise ValueError("cutoff must be positive.")
         if not isinstance(self.energy_key, str) or not self.energy_key:
             raise ValueError("energy_key must be a non-empty string.")
+        if not isinstance(self.energy_difference_key, str) or not self.energy_difference_key:
+            raise ValueError("energy_difference_key must be a non-empty string.")
         if not isinstance(self.forces_key, str) or not self.forces_key:
             raise ValueError("forces_key must be a non-empty string.")
-        if self.metadata is not None and not isinstance(
-            self.metadata, AtomDataMetadata
-        ):
-            raise TypeError("metadata must be an AtomDataMetadata object.")
-        if self.metadata is not None and not np.isclose(
-            self.cutoff, self.metadata.r_max
-        ):
-            raise ValueError("cutoff must match metadata.r_max.")
+        if not isinstance(self.nacs_key, str) or not self.nacs_key:
+            raise ValueError("nacs_key must be a non-empty string.")
+
+        if self.E0s is not None:
+            """
+            If E0s is specified, we normalise it into a standard form
+            Accept either a dictionary of E0s, or a dictionary of heads
+            containing dictionaries of E0s
+            If only a dictionary of E0s is specified, we normalise this to
+            output "default": {Dict of E0s} so that the shapes are more
+            consistent later on
+            """
+            if not isinstance(self.E0s, dict):
+                raise ValueError(
+                    "E0s should be a dictionary!!"
+                )
+
+            values = list(self.E0s.values())
+            if all(not isinstance(value, dict) for value in values):
+                self.E0s = {"default": self.E0s}
+            elif not all(isinstance(value, dict) for value in values):
+                raise ValueError(
+                    "Each head E0s must be a dictionary"
+                )
 
     def load(
         self,
         atoms,
         batch_size: int = 10,
         shuffle: bool = False,
-        drop_last: bool = False,
+        seed: Optional[int] = None,
+        balance_heads: bool = False,
     ) -> DataLoader:
         """
         Main loader function to convert an atoms list into dataloader
         1) Normalise list or dict of atoms into dict and validate it
-        2) Build configuration objects
+        2) Build configuration objects by head
         3) Build z table and AtomicData objects
         4) Build or validate metadata
         """
@@ -137,29 +181,73 @@ class AtomDataLoaderBuilder:
             z for config in all_configs for z in config.atomic_numbers
         )
 
-        # Build AtomicData before creating or validating metadata
-        atomic_dataset = self._build_atomic_dataset(
-            configs_by_head, z_table=z_table
-        )
+        # Construct the metadata
+        if self._metadata is None:
+            # First thing is to get the head to index mapping
+            head_to_index = {
+                name: index for index, name in enumerate(configs_by_head)
+            }
+            if self.energy_difference_references is None:
+                energy_difference_references = {
+                    head_name: None for head_name in head_to_index
+                }
+            else:
+                energy_difference_references = dict(
+                    self.energy_difference_references
+                )
+            e0s_by_head = self._normalise_e0s(
+                        configs_by_head, z_table, head_to_index
+            )
+            atomic_energies = self._e0s_to_matrix(e0s_by_head, head_to_index)
+            self._prepare_centered_energy_differences(
+                configs_by_head,
+                z_table,
+                head_to_index,
+                atomic_energies,
+                energy_difference_references,
+            )
 
-        if self.metadata is None:
-            self.metadata = self._build_metadata(
-                all_configs, z_table, atomic_dataset
+            atomic_dataset = self._build_atomic_dataset(
+                configs_by_head, z_table, head_to_index
+            )
+            self._metadata = self._build_metadata(
+                configs_by_head,
+                z_table,
+                atomic_energies,
+                atomic_dataset,
+                head_to_index,
+                energy_difference_references,
             )
         else:
-            self._validate_metadata(z_table, all_configs)
+            self._validate_metadata(z_table, configs_by_head)
+            self._prepare_centered_energy_differences(
+                            configs_by_head,
+                            self._metadata.z_table,
+                            self._metadata.head_to_index,
+                            self._metadata.atomic_energies,
+                            self._metadata.energy_difference_references,
+            )
+            atomic_dataset = self._build_atomic_dataset(
+                configs_by_head,
+                self._metadata.z_table,
+                self._metadata.head_to_index,
+            )
 
-        return DataLoader(
-            dataset=atomic_dataset,
+        # Initialise the data sampler from atomic dataset
+        batch_sampler = HeadBatchSampler(
+            atomic_dataset,
             batch_size=batch_size,
             shuffle=shuffle,
-            drop_last=drop_last,
+            seed=seed,
+            balance_heads=balance_heads,
         )
 
+        return DataLoader(dataset=atomic_dataset, batch_sampler=batch_sampler)
+
     def get_metadata(self) -> AtomDataMetadata:
-        if self.metadata is None:
+        if self._metadata is None:
             raise RuntimeError("Metadata is unavailable. Load training data first.")
-        return self.metadata
+        return self._metadata
 
     def _normalise_atoms(self, atoms) -> Dict[str, List[Atoms]]:
         """
@@ -178,26 +266,30 @@ class AtomDataLoaderBuilder:
         """
         Mini helper function to convert atoms list into config list
         """
-        config = config_from_atoms_list(atoms_list,
-                                        energy_key=self.energy_key,
-                                        forces_key=self.forces_key)
+        config = config_from_atoms_list(
+            atoms_list,
+            energy_key=self.energy_key,
+            energy_difference_key=self.energy_difference_key,
+            forces_key=self.forces_key,
+            nacs_key=self.nacs_key
+        )
         return config
 
-    def _build_atomic_dataset(self, configs_by_head, z_table):
+    def _build_atomic_dataset(self, configs_by_head, z_table, head_to_index):
         """
         Convert the config objects into atomic_data objects
-        Preserve each dictionary key as a raw head_label string
-        TBC when implemented multihead, might use head_index here
+        Preserve each dictionary key as a numeric graph-level head
         """
         atomic_dataset = []
-        for head, configs in configs_by_head.items():
+        for head_name, configs in configs_by_head.items():
+            head_index = head_to_index[head_name]
             for config in configs:
                 atomic_data = AtomicData.from_config(
                     config,
                     z_table=z_table,
                     cutoff=self.cutoff,
                 )
-                atomic_data.head_label = head
+                atomic_data.head = torch.tensor(head_index, dtype=torch.long)
                 atomic_dataset.append(atomic_data)
         return atomic_dataset
 
@@ -211,45 +303,82 @@ class AtomDataLoaderBuilder:
             all_configs.extend(configs)
         return all_configs
 
-    def _convert_e0s_to_array(self, z_table) -> np.ndarray:
+    @staticmethod
+    def _convert_e0s_to_array(e0s, z_table) -> np.ndarray:
         """
-        Helper to convert the E0s dictionary into array of atomic energies
-        based on ase atomic_numbers table and z table 
-        If conversion fails then raises error with input format
+        Helper to convert one E0s dictionary into an array of atomic energies
+        ordered according to the z table
+        Input: {"C": 5.0, "H", 0.4} for eg
+        Output will be an array based on z tables
+        This function is used in normalise e0s
         """
-        try:
-            e0s_by_atomic_number = {
-                atomic_numbers[symbol]: float(value)
-                for symbol, value in self.E0s.items()
+        symbols = [chemical_symbols[int(z)] for z in z_table.zs]
+        if set(e0s) != set(symbols):
+            raise ValueError(
+                f"E0s must contain exactly these elements: {symbols}."
+            )
+
+        return np.array([e0s[symbol] for symbol in symbols], dtype=np.float64)
+
+
+    def _normalise_e0s(self, configs_by_head, z_table, head_to_index):
+        """
+        Normalise supplied or calculated E0s into a dictionary of arrays
+        Each dictionary keys are the heads, values are the arrays after they
+        have been converted. Term this outputs as E0s by head
+        """
+        # First take the averages to get E0 if its not specified
+        if self.E0s is None:
+            e0s_by_head = {}
+            for head_name, configs in configs_by_head.items():
+                average_e0s = compute_average_E0s(configs, z_table)
+                e0s_by_head[head_name] = np.array(
+                    [average_e0s[z] for z in z_table.zs], dtype=np.float64
+                )
+            return e0s_by_head
+
+        # If only one E0s are specified, but there are multiple heads, then
+        # the E0s are duplicated to match the total number of heads too
+        if set(self.E0s) == {"default"}:
+            shared_e0s = self._convert_e0s_to_array(
+                self.E0s["default"], z_table
+            )
+            return {
+                head_name: shared_e0s.copy() for head_name in head_to_index
             }
 
-            if len(e0s_by_atomic_number) != len(z_table):
-                raise ValueError
-
-            return np.array(
-                [e0s_by_atomic_number[int(z)] for z in z_table.zs],
-                dtype=np.float64,
-            )
-        except (AttributeError, KeyError, TypeError, ValueError):
+        # If the specified E0s dont match the number of heads then raise error
+        if set(self.E0s) != set(head_to_index):
             raise ValueError(
-                "E0s must contain one value for every element in the z table, "
-                'for example {"H": -0.5, "C": -37.8}.'
-            ) from None
+                "Head-specific E0s must contain exactly the configured head names."
+            )
+        # Convert the E0s values into the array format
+        return {
+            head_name: self._convert_e0s_to_array(
+                self.E0s[head_name], z_table
+            )
+            for head_name in head_to_index
+        }
 
-    def _resolve_atomic_energies(self, all_configs, z_table) -> np.ndarray:
-        """
-        If the E0s are provided, then use those values to get atomic energies
-        If not E0s are calculated based on the average value of dataset
-        from the configs
-        """
-        if self.E0s is not None:
-            return self._convert_e0s_to_array(z_table)
 
-        average_e0s = compute_average_E0s(all_configs, z_table)
-        return np.array([average_e0s[z] for z in z_table.zs], dtype=np.float64)
+    @staticmethod
+    def _e0s_to_matrix(e0s_by_head, head_to_index) -> np.ndarray:
+        """
+        From the dictionary constructed, we convert it into a matrix
+        This matrix is input into the model and accessed from there based
+        on the head dimensions
+        """
+        ordered_heads = sorted(head_to_index, key=head_to_index.get)
+        return np.stack([e0s_by_head[head] for head in ordered_heads])
 
     def _build_metadata(
-        self, all_configs, z_table, atomic_dataset
+        self,
+        configs_by_head,
+        z_table,
+        atomic_energies,
+        atomic_dataset,
+        head_to_index,
+        energy_difference_references,
     ) -> AtomDataMetadata:
         """
         Builds the important metadata from the data that is used to initialise
@@ -257,8 +386,8 @@ class AtomDataLoaderBuilder:
         This is stored in the metadata class so that model can easily reference it
         later when model is initialised
         """
+        all_configs = self._flatten_configs(configs_by_head)
         n_energies = self._infer_n_energies(all_configs)
-        atomic_energies = self._resolve_atomic_energies(all_configs, z_table)
         avg_num_neighbors = self._compute_avg_num_neighbors(atomic_dataset)
 
         return AtomDataMetadata(
@@ -267,6 +396,8 @@ class AtomDataLoaderBuilder:
             r_max=self.cutoff,
             n_energies=n_energies,
             avg_num_neighbors=avg_num_neighbors,
+            head_to_index=head_to_index,
+            energy_difference_references=energy_difference_references,
         )
 
     @staticmethod
@@ -295,20 +426,25 @@ class AtomDataLoaderBuilder:
         counts = torch.cat(neighbor_counts).type(torch.get_default_dtype())
         return float(torch.mean(counts).item())
 
-    def _validate_metadata(self, z_table, all_configs) -> None:
+    def _validate_metadata(self, z_table, configs_by_head) -> None:
         """
         Validate that the metadata used from before supports the data
         Check cutoff, z table, number of energy states and E0s if provided
         """
-        if not np.isclose(self.cutoff, self.metadata.r_max):
+        if not np.isclose(self.cutoff, self._metadata.r_max):
             raise ValueError("cutoff must match metadata.r_max.")
 
         current_atomic_numbers = [int(z) for z in z_table.zs]
-        if current_atomic_numbers != self.metadata.atomic_numbers:
+        if current_atomic_numbers != self._metadata.atomic_numbers:
             raise ValueError("Input z table must match metadata.z_table.")
 
+        unknown_heads = set(configs_by_head) - set(self._metadata.head_to_index)
+        if unknown_heads:
+            raise ValueError(f"Input contains unknown heads: {sorted(unknown_heads)}.")
+
+        all_configs = self._flatten_configs(configs_by_head)
         n_energies = self._infer_n_energies(all_configs)
-        if n_energies != self.metadata.n_energies:
+        if n_energies != self._metadata.n_energies:
             raise ValueError(
                 "Input data must contain the same number of energies as metadata."
             )
@@ -316,6 +452,71 @@ class AtomDataLoaderBuilder:
         # Convert E0s to array and double check for consistency if both 
         # E0s and metadat are provided
         if self.E0s is not None:
-            supplied_e0s = self._convert_e0s_to_array(z_table)
-            if not np.allclose(supplied_e0s, self.metadata.atomic_energies):
+            e0s_by_head = self._normalise_e0s(
+                configs_by_head, z_table, self._metadata.head_to_index
+            )
+            supplied_e0s = self._e0s_to_matrix(
+                e0s_by_head, self._metadata.head_to_index
+            )
+            if not np.allclose(supplied_e0s, self._metadata.atomic_energies):
                 raise ValueError("Input E0s must match metadata.atomic_energies.")
+
+    def _prepare_centered_energy_differences(
+            self,
+            configs_by_head,
+            z_table,
+            head_to_index,
+            atomic_energies,
+            energy_difference_references,
+        ):
+        """
+        Take in all the configs_by_head and relevant data
+        Take config.energy_differences and create a centered_energy_differences
+        This centered energy differences is then fed into the dataloader
+        It correctly accounts for the differences in E0s
+
+        Also validates and raises error here if multihead is attempted without
+        providing raw differences. 
+        """
+        z_to_index = {int(z): index for index, z in enumerate(z_table.zs)}
+
+        for head_name, configs in configs_by_head.items():
+            head_index = head_to_index[head_name]
+            reference_head = energy_difference_references[head_name]
+
+            for config in configs:
+                element_indices = [
+                    z_to_index[int(z)] for z in config.atomic_numbers
+                ]
+                raw_differences = config.energy_difference
+                energy = np.asarray(config.energy)
+                current_e0 = atomic_energies[head_index, element_indices].sum()
+
+                # First check the reference head to determine if differences are required
+                # This can be for single head training, or the base LF data
+                if reference_head is None:
+                    config.centered_energy_difference = energy - current_e0
+                    continue
+                else:
+                    # If the reference head is not none, expect energy differences to be provided
+                    if raw_differences is None:
+                        raise ValueError(
+                            "Must specify raw differences for multihead training"
+                        )
+                    
+                    # First convert raw differences into np array
+                    raw_differences = np.asarray(raw_differences)
+                    reference_index = head_to_index[reference_head]
+                    reference_e0 = atomic_energies[reference_index, element_indices].sum()
+
+                    """
+                    Cases: if I just input CASSCF --> raw diff is None, centered diff is energy - E0
+                    If input both Casscf and CASPT2
+                    when evaluating CASSCF energy, reference is None 
+                        -> Center diff is CASSCF energy - CASSCF E0
+                    when evaluating CASPT2 energy, reference is CASSCF E0 
+                        -> Want (CASPT2 energy - CASPT2 E0) - (CASSCF energy - CASSCF E0)
+                        -> Center diff is CASPT2 energy - CASSCF energy (input) - (CASPT2 E0 - CASSCF E0)
+                        -> Subtract difference between CASPT2 (current) and CASSCF (ref) E0s
+                    """
+                    config.centered_energy_difference = raw_differences - (current_e0 - reference_e0)

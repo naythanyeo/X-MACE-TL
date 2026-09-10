@@ -5,15 +5,15 @@ from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Union
+from pathlib import Path
 
 import torch
-from sklearn.model_selection import KFold
 from torch.optim.lr_scheduler import ReduceLROnPlateau
-from torch.utils.data import Subset
 from torch_ema import ExponentialMovingAverage
 
 from mace.modules.lora import has_lora_layers, merge_lora_weights
 from mace.tools.torch_geometric import DataLoader
+from mace.modules.loss import phase_rmse_loss
 
 from .optimiser import build_optimiser
 
@@ -50,6 +50,8 @@ class Trainer:
     stopping_patience: int = 2048
     restore_best: bool = True
 
+    gradient_accumulation_steps: int = 1
+
     def __post_init__(self) -> None:
         if self.max_epochs < 1:
             raise ValueError("max_epochs must be at least 1.")
@@ -67,6 +69,14 @@ class Trainer:
             raise ValueError(
                 "stopping_patience must be at least 1 when early stopping is enabled."
             )
+        if self.gradient_accumulation_steps < 1:
+            raise ValueError("gradient_accumulation_steps must be at least 1")
+
+        # If checkpoints are specified, validate and create parent dir
+        if self.checkpoint_dir is not None:
+            if self.checkpoint_interval <= 0:
+                raise ValueError("checkpoint_interval must be position")
+            Path(self.checkpoint_dir).mkdir(parents=True, exist_ok=True)
 
         self.device = torch.device(self.device)
 
@@ -78,6 +88,7 @@ class Trainer:
         loss_fn: torch.nn.Module,
         checkpoint_epoch: Optional[int] = None,
         checkpoint_models_dir=None,
+        compute_nacs: bool = False,
     ):
         """
         Main trainer loop that controls the overall training like early stopping
@@ -130,16 +141,26 @@ class Trainer:
             "valid_force_mae": [],
             "learning_rate": [],
             "checkpoint_models": [],
+            "train_loss_breakdown": [],
+            "valid_loss_breakdown": [],
+            "learning_rate": [],
+            "learning_rates": [],
         }
+        if compute_nacs:
+            history["valid_nac_phase_rmse"] = []
+            history["valid_nac_abs_mae"] = []
         best_state = None
         best_epoch = 0
         best_valid_loss = float("inf")
         patience_counter = 0
 
         for epoch in range(1, self.max_epochs + 1):
+
+            # Save the GNN base LR 
             current_lr = optimiser.param_groups[0]["lr"]
+            
             train_metrics = self._run_epoch(
-                model, train_loader, optimiser, loss_fn, training=True, ema=ema
+                model, train_loader, optimiser, loss_fn, training=True, ema=ema, compute_nacs=compute_nacs
             )
             train_loss = train_metrics["loss"]
 
@@ -149,7 +170,7 @@ class Trainer:
             )
             with validation_context:
                 valid_metrics = self._run_epoch(
-                    model, valid_loader, optimiser, loss_fn, training=False, test=True
+                    model, valid_loader, optimiser, loss_fn, training=False, test=True, compute_nacs=compute_nacs
                 )
                 valid_loss = valid_metrics["loss"]
 
@@ -195,6 +216,17 @@ class Trainer:
             history["valid_loss"].append(valid_loss)
             history["valid_energy_mae"].append(valid_metrics["energy_mae"])
             history["valid_force_mae"].append(valid_metrics["force_mae"])
+            if compute_nacs:
+                history["valid_nac_phase_rmse"].append(
+                    valid_metrics["nac_phase_rmse"]
+                )
+                history["valid_nac_abs_mae"].append(valid_metrics["nac_abs_mae"])
+            history["train_loss_breakdown"].append(
+                train_metrics.get("loss_breakdown", {})
+            )
+            history["valid_loss_breakdown"].append(
+                valid_metrics.get("loss_breakdown", {})
+            )
             history["learning_rate"].append(current_lr)
 
             # Update the optimiser learning rate for the next epoch
@@ -202,13 +234,18 @@ class Trainer:
 
             # Can toggle this to kill output
             if self.verbose:
-                print(
+                message = (
                     f"Epoch {epoch:03d} | train_loss={train_loss:.6f} | "
                     f"valid_loss={valid_loss:.6f} | "
                     f"energy_mae={valid_metrics['energy_mae']:.6f} | "
-                    f"force_mae={valid_metrics['force_mae']:.6f} | "
-                    f"lr={current_lr:.2e}"
+                    f"force_mae={valid_metrics['force_mae']:.6f}"
                 )
+                if compute_nacs:
+                    message += (
+                        f" | nac_phase_rmse={valid_metrics['nac_phase_rmse']:.6f}"
+                        f" | nac_abs_mae={valid_metrics['nac_abs_mae']:.6f}"
+                    )
+                print(message)
 
             # Only break if early stopping is true
             if self.early_stopping and patience_counter >= self.stopping_patience:
@@ -227,121 +264,6 @@ class Trainer:
 
         return model, history
 
-    def train_k_fold_models(
-        self,
-        model: torch.nn.Module,
-        data_loader: DataLoader,
-        loss_fn: torch.nn.Module,
-        k: int = 5,
-        seed: int = 42,
-        checkpoint_epoch: Optional[int] = None,
-        checkpoint_models_dir=None,
-    ):
-        """
-        Train k independent model copies using k-fold cross-validation.
-        Records also the mean and variances of all of the k folds
-        """
-        dataset_size = len(data_loader.dataset)
-        if not 2 <= k <= dataset_size:
-            raise ValueError("k must be between 2 and the dataset size.")
-
-        fold_loaders = self._build_fold_loaders(data_loader, k, seed)
-        models = {}
-        full_history = {}
-
-        for fold, (train_loader, valid_loader) in enumerate(fold_loaders, start=1):
-            if self.verbose:
-                print(f"Fold {fold}/{k}")
-            # Create a copy of the model to train
-            fold_model = deepcopy(model).to(self.device)
-            fold_checkpoint_dir = None
-            if checkpoint_epoch is not None:
-                fold_checkpoint_dir = (
-                    Path(checkpoint_models_dir)
-                    .expanduser()
-                    .resolve()
-                    / f"fold_{fold:02d}"
-                )
-            fold_model, fold_history = self.train_model(
-                fold_model,
-                train_loader,
-                valid_loader,
-                loss_fn,
-                checkpoint_epoch=checkpoint_epoch,
-                checkpoint_models_dir=fold_checkpoint_dir,
-            )
-
-            model_key = f"model_{fold}"
-            models[model_key] = fold_model.cpu()
-            full_history[model_key] = fold_history
-
-        full_history["combined"] = self._combine_fold_histories(full_history)
-
-        return models, full_history
-
-    @staticmethod
-    def _combine_fold_histories(full_history):
-        """
-        For each fold, record the various properties then take the mean and variance 
-        Output into one combined dictionary 
-        """
-
-        fold_values = {
-            "best_epoch": [],
-            "valid_loss": [],
-            "valid_energy_mae": [],
-            "valid_force_mae": []
-        }
-
-        for history in full_history.values():
-            best_epoch = history["best_epoch"]
-            best_index = best_epoch - 1
-            fold_values["best_epoch"].append(best_epoch)
-            fold_values["valid_loss"].append(history["valid_loss"][best_index])
-            fold_values["valid_energy_mae"].append(
-                history["valid_energy_mae"][best_index]
-            )
-            fold_values["valid_force_mae"].append(
-                history["valid_force_mae"][best_index]
-            )
-
-        combined = {}
-        for metric, values in fold_values.items():
-            values = torch.tensor(values, dtype=torch.float64)
-            combined[metric] = (
-                torch.mean(values).item(),
-                torch.var(values, unbiased=False).item()
-            )
-
-        return combined
-
-    @staticmethod
-    def _build_fold_loaders(data_loader: DataLoader, k: int, seed: int):
-        """
-        Use SK-LEARN to build k fold loaders 
-        """
-        splitter = KFold(n_splits=k, shuffle=True, random_state=seed)
-        loader_pairs = []
-        for fold, (train_indices, valid_indices) in enumerate(
-            splitter.split(range(len(data_loader.dataset)))
-        ):
-            train_loader = DataLoader(
-                Subset(data_loader.dataset, train_indices.tolist()),
-                batch_size=data_loader.batch_size,
-                shuffle=True,
-                drop_last=False,
-                generator=torch.Generator().manual_seed(seed + fold)
-            )
-            valid_loader = DataLoader(
-                Subset(data_loader.dataset, valid_indices.tolist()),
-                batch_size=data_loader.batch_size,
-                shuffle=False,
-                drop_last=False
-            )
-            loader_pairs.append((train_loader, valid_loader))
-
-        return loader_pairs
-
     def _run_epoch(
         self,
         model: torch.nn.Module,
@@ -350,34 +272,31 @@ class Trainer:
         loss_fn: torch.nn.Module,
         training: bool, # Training vs Validation Mode
         test: bool = False,
-        ema: Optional[ExponentialMovingAverage] = None
+        ema: Optional[ExponentialMovingAverage] = None,
+        compute_nacs: bool = False
     ) -> dict:
         model.train(training)
         total_loss = 0.0
         num_batches = 0
+        loss_breakdown = {}
         energy_absolute_error = None
         force_absolute_error = None
         energy_count = 0
         force_count = 0
+        nac_phase_rmse_total = 0.0
+        nac_phase_batch_count = 0
+        nac_abs_error_total = 0.0
+        nac_raw_component_count = 0
 
         base_model = model.module if hasattr(model, "module") else model
         prepare_outputs = getattr(base_model, "prepare_loss_outputs", None)
 
-        for batch in data_loader:
-            """
-            TBC for future multihead data loading then batch will contain additional
-            labels that indicate which head it uses
+        if training:
+            optimiser.zero_grad(set_to_none=True)
 
-            model and loss function will read the head label and then run the forward 
-            or calculate weighted loss based on that 
-
-            Trainer remains generic
-            """
+        for batch_index, batch in enumerate(data_loader):
             batch = batch.to(self.device)
             batch_dict = batch.to_dict()
-
-            if training:
-                optimiser.zero_grad(set_to_none=True)
 
             output = model(batch_dict, training=training)
             """
@@ -391,6 +310,15 @@ class Trainer:
                 output = prepare_outputs(batch_dict, output)
 
             loss = loss_fn(pred=output, ref=batch)
+            breakdown = getattr(loss_fn, "loss_breakdown", None)
+            if breakdown is not None:
+                head = int(batch["head"][0].item())
+                for name, value in breakdown.items():
+                    if value is not None:
+                        key = f"{head}_{name}"
+                        loss_breakdown[key] = loss_breakdown.get(key, 0.0) + (
+                            value.detach().item()
+                        )
 
             if test:
                 """
@@ -412,17 +340,38 @@ class Trainer:
                 energy_count += energy_error.numel()
                 force_count += force_error.numel()
 
+                if compute_nacs:
+                    nac_phase_rmse = phase_rmse_loss(batch, output)
+                    nac_abs_error = torch.abs(output["nacs"] - batch["nacs"])
+
+                    nac_phase_rmse_total += nac_phase_rmse.detach().item()
+                    nac_phase_batch_count += 1
+                    nac_abs_error_total += nac_abs_error.detach().sum().item()
+                    nac_raw_component_count += nac_abs_error.numel()
+
             if training:
-                loss.backward()
-                # Gradient clipping 
-                if self.max_grad_norm is not None:
-                    torch.nn.utils.clip_grad_norm_(
-                        model.parameters(), max_norm=self.max_grad_norm
-                    )
-                optimiser.step()
-                # Update the EMA weights after the optimiser step if EMA is enabled
-                if ema is not None:
-                    ema.update()
+                scaled_loss = loss / self.gradient_accumulation_steps
+                scaled_loss.backward()
+
+                should_step = (
+                    (batch_index + 1) % self.gradient_accumulation_steps == 0 or
+                    batch_index == (len(data_loader) - 1)
+                )
+
+                # Only step every other steps
+                if should_step:
+                    # Gradient clipping 
+                    if self.max_grad_norm is not None:
+                        torch.nn.utils.clip_grad_norm_(
+                            model.parameters(), max_norm=self.max_grad_norm
+                        )
+                    optimiser.step()
+                    # Update the EMA weights after the optimiser step if EMA is enabled
+                    if ema is not None:
+                        ema.update()
+
+                    # Reset gradients to None
+                    optimiser.zero_grad(set_to_none=True)
 
             total_loss += loss.detach().item()
             num_batches += 1
@@ -431,8 +380,18 @@ class Trainer:
             raise ValueError("DataLoader is empty.")
 
         metrics = {"loss": total_loss / num_batches}
+        if loss_breakdown:
+            metrics["loss_breakdown"] = loss_breakdown
         if test:
             metrics["energy_mae"] = energy_absolute_error.item() / energy_count
             metrics["force_mae"] = force_absolute_error.item() / force_count
+            if compute_nacs:
+                metrics["nac_phase_rmse"] = (
+                    nac_phase_rmse_total / nac_phase_batch_count
+                )
+                metrics["nac_abs_mae"] = (
+                    nac_abs_error_total / nac_raw_component_count
+                )
+
 
         return metrics

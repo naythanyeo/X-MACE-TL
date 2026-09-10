@@ -1,12 +1,11 @@
 """
-Updated sample script that does k fold validation training 
-Mainly introduce all the new training paramters to match github as 
-best as possible 
+Minimal train-validation example using the reusable X-MACE training API.
 """
 from pathlib import Path
 
 import ase.io
 import torch
+from sklearn.model_selection import train_test_split
 
 from mace import modules
 from mace.data.atom_data_loader import AtomDataLoaderBuilder
@@ -23,10 +22,13 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 def main() -> None:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     # Based on the github, uses torch float 32
-    torch.set_default_dtype(torch.float2)  
+    torch.set_default_dtype(torch.float32)
     torch.manual_seed(42)
 
     atoms = ase.io.read(XYZ_FILE, index=":")
+    train_atoms, valid_atoms = train_test_split(
+        atoms, test_size=0.2, random_state=42
+    )
 
     # Update here: Can now specify the E0s inside data_builder
     # The E0s itself will be converted accordingly, if not provided then 
@@ -41,11 +43,17 @@ def main() -> None:
         # Need to update to use the one Marvin calculated
     )
     # CLI claims to use batch size 10
-    data_loader = data_builder.load(
-        atoms,
+    train_loader = data_builder.load(
+        train_atoms,
+        batch_size=10,
+        shuffle=True,
+        seed=42,
+    )
+    valid_loader = data_builder.load(
+        valid_atoms,
         batch_size=10,
         shuffle=False,
-        drop_last=False,
+        seed=42,
     )
 
     # For model we just use default ANI500K presets 
@@ -93,25 +101,19 @@ def main() -> None:
         restore_best=True
     )
 
-    # Try train k fold
-    models, full_history = trainer.train_k_fold_models(
+    model, history = trainer.train_model(
         model,
-        data_loader,
+        train_loader,
+        valid_loader,
         loss_fn,
-        k=5,
-        seed=42,
     )
 
-    # K-fold models are returned on CPU so they remain portable when saved.
-    for model_name, fold_model in models.items():
-        torch.save(fold_model, OUTPUT_DIR / f"{model_name}.model")
-    torch.save(full_history, OUTPUT_DIR / "kfold_history.pt")
+    torch.save(model.cpu(), OUTPUT_DIR / "model.model")
+    torch.save(history, OUTPUT_DIR / "history.pt")
 
-    # Output the metrics 
-    print(f"Saved k-fold outputs to: {OUTPUT_DIR}")
-    print("Combined k-fold metrics:")
-    for metric, (mean, variance) in full_history["combined"].items():
-        print(f"{metric}: mean={mean:.6f}, variance={variance:.6f}")
+    print(f"Saved outputs to: {OUTPUT_DIR}")
+    print(f"Best epoch: {history['best_epoch']}")
+    print(f"Best validation loss: {history['best_valid_loss']:.6f}")
 
 
 if __name__ == "__main__":

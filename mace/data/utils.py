@@ -35,6 +35,8 @@ class Configuration:
     atomic_numbers: np.ndarray
     positions: Positions  # Angstrom
     energy: Optional[float] = None  # eV
+    energy_difference: Optional[float] = None # eV
+    centered_energy_difference: Optional[float] = None # eV
     forces: Optional[Forces] = None  # eV/Angstrom
     stress: Optional[Stress] = None  # eV/Angstrom^3
     virials: Optional[Virials] = None  # eV
@@ -92,6 +94,7 @@ def random_train_valid_split(
 def config_from_atoms_list(
     atoms_list: List[ase.Atoms],
     energy_key="REF_energy",
+    energy_difference_key = "REF_raw_energy_differences",
     forces_key="REF_forces",
     stress_key="REF_stress",
     virials_key="REF_virials",
@@ -111,6 +114,7 @@ def config_from_atoms_list(
             config_from_atoms(
                 atoms,
                 energy_key=energy_key,
+                energy_difference_key=energy_difference_key,
                 forces_key=forces_key,
                 stress_key=stress_key,
                 virials_key=virials_key,
@@ -127,6 +131,7 @@ def config_from_atoms_list(
 def config_from_atoms(
     atoms: ase.Atoms,
     energy_key="REF_energy",
+    energy_difference_key="REF_raw_energy_differences",
     forces_key="REF_forces",
     stress_key="REF_stress",
     virials_key="REF_virials",
@@ -140,6 +145,7 @@ def config_from_atoms(
     if config_type_weights is None:
         config_type_weights = DEFAULT_CONFIG_TYPE_WEIGHTS
     energy = atoms.info.get(energy_key, None)  # eV
+    energy_difference = atoms.info.get(energy_difference_key, None) # eV
     forces = atoms.info.get(forces_key, None)  # eV / Ang
     stress = atoms.info.get(stress_key, None)  # eV / Ang ^ 3
     virials = atoms.info.get(virials_key, None)
@@ -190,6 +196,7 @@ def config_from_atoms(
         atomic_numbers=atomic_numbers,
         positions=atoms.get_positions(),
         energy=energy,
+        energy_difference=energy_difference,
         forces=forces,
         stress=stress,
         virials=virials,
