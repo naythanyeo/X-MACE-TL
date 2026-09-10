@@ -863,12 +863,7 @@ class AutoencoderExcitedMACE(torch.nn.Module):
 
         # Add on the relevant interacion layers 
         for i in range(num_interactions - 1):
-            if i == num_interactions - 2:
-                hidden_irreps_out = str(
-                    hidden_irreps[0]
-                )  # Select only scalars for last layer
-            else:
-                hidden_irreps_out = hidden_irreps
+            hidden_irreps_out = hidden_irreps
             inter = interaction_cls(
                 node_attrs_irreps=node_attr_irreps,
                 node_feats_irreps=hidden_irreps,
@@ -888,23 +883,14 @@ class AutoencoderExcitedMACE(torch.nn.Module):
                 use_sc=True,
             )
             self.products.append(prod)
+            if self.compute_nacs:
+                nac_readouts.append(
+                    LinearNACReadoutBlock(hidden_irreps_out, self.nac_indices)
+                )
             if i == num_interactions - 2:
-                if self.compute_nacs:
-                    nac_readouts.append(
-                        NonLinearNACReadoutBlock(
-                            hidden_irreps_out,
-                            MLP_irreps,
-                            gate,
-                            self.nac_indices,
-                        )
-                    )
                 if self.compute_socs:
                     socs_readouts.append(NonLinearSocReadoutBlock(hidden_irreps_out, MLP_irreps, gate, self.soc_indices))
             else:
-                if self.compute_nacs:
-                    nac_readouts.append(
-                        LinearNACReadoutBlock(hidden_irreps, self.nac_indices)
-                    )
                 if self.compute_socs:
                     socs_readouts.append(LinearSocReadoutBlock(hidden_irreps, self.soc_indices))
 

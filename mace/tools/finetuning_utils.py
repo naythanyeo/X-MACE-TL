@@ -77,7 +77,7 @@ def load_foundations(
             model.interactions[i].__class__.__name__
             == "RealAgnosticResidualInteractionBlock"
         ):
-            model.interactions[i].skip_tp.weight = torch.nn.Parameter(
+            skip_tp_weight = (
                 model_foundations.interactions[i]
                 .skip_tp.weight.reshape(
                     num_channels_foundation,
@@ -88,6 +88,8 @@ def load_foundations(
                 .clone()
                 / (num_species_foundations / num_species) ** 0.5
             )
+            if model.interactions[i].skip_tp.weight.shape == skip_tp_weight.shape:
+                model.interactions[i].skip_tp.weight = torch.nn.Parameter(skip_tp_weight)
         else:
             model.interactions[i].skip_tp.weight = torch.nn.Parameter(
                 model_foundations.interactions[i]
@@ -124,9 +126,9 @@ def load_foundations(
                     )
                 )
 
-        model.products[i].linear.weight = torch.nn.Parameter(
-            model_foundations.products[i].linear.weight.clone()
-        )
+        product_linear_weight = model_foundations.products[i].linear.weight.clone()
+        if model.products[i].linear.weight.shape == product_linear_weight.shape:
+            model.products[i].linear.weight = torch.nn.Parameter(product_linear_weight)
     
     model.scale_shift = model_foundations.scale_shift
 
