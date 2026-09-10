@@ -3,6 +3,7 @@
 from contextlib import nullcontext
 from copy import deepcopy
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional, Union
 from pathlib import Path
 
@@ -10,6 +11,7 @@ import torch
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch_ema import ExponentialMovingAverage
 
+from mace.modules.lora import has_lora_layers, merge_lora_weights
 from mace.tools.torch_geometric import DataLoader
 from mace.modules.loss import phase_rmse_loss
 
@@ -50,9 +52,6 @@ class Trainer:
 
     gradient_accumulation_steps: int = 1
 
-    checkpoint_dir: str = None
-    checkpoint_interval: int = 5
-
     def __post_init__(self) -> None:
         if self.max_epochs < 1:
             raise ValueError("max_epochs must be at least 1.")
@@ -87,6 +86,8 @@ class Trainer:
         train_loader: DataLoader,
         valid_loader: DataLoader,
         loss_fn: torch.nn.Module,
+        checkpoint_epoch: Optional[int] = None,
+        checkpoint_models_dir=None,
         compute_nacs: bool = False,
     ):
         """
@@ -96,6 +97,26 @@ class Trainer:
         Learning rate scheduler and ema also controlled here 
         For ema, the validation context is defined and used during validation mode
         """
+        if checkpoint_epoch is not None and (
+            isinstance(checkpoint_epoch, bool)
+            or not isinstance(checkpoint_epoch, int)
+            or checkpoint_epoch < 1
+        ):
+            raise ValueError("checkpoint_epoch must be a positive integer or None.")
+
+        if checkpoint_epoch is not None:
+            if checkpoint_models_dir is None:
+                raise ValueError(
+                    "checkpoint_models_dir is required when checkpoint_epoch is set."
+                )
+            checkpoint_models_dir = Path(checkpoint_models_dir).expanduser().resolve()
+            if checkpoint_models_dir.exists() and not checkpoint_models_dir.is_dir():
+                raise NotADirectoryError(checkpoint_models_dir)
+            checkpoint_models_dir.mkdir(
+                parents=True,
+                exist_ok=True,
+            )
+
         model.to(self.device)
         optimiser = build_optimiser(
             model,
@@ -118,6 +139,8 @@ class Trainer:
             "valid_loss": [],
             "valid_energy_mae": [],
             "valid_force_mae": [],
+            "learning_rate": [],
+            "checkpoint_models": [],
             "train_loss_breakdown": [],
             "valid_loss_breakdown": [],
             "learning_rate": [],
@@ -160,11 +183,33 @@ class Trainer:
                 else:
                     patience_counter += 1
 
-                # Save checkpoints
-                if self.checkpoint_dir is not None:
-                    if epoch % self.checkpoint_interval == 0:
-                        model_path = Path(self.checkpoint_dir) / f"model_epoch{epoch}.pt"
-                        torch.save(model.state_dict(), model_path)
+                if checkpoint_epoch is not None and epoch % checkpoint_epoch == 0:
+                    checkpoint_path = (
+                        checkpoint_models_dir
+                        / f"checkpoint_epoch_{epoch:06d}.pt"
+                    )
+                    if checkpoint_path.exists():
+                        raise FileExistsError(checkpoint_path)
+
+                    if has_lora_layers(model):
+                        checkpoint_model = merge_lora_weights(model, inplace=False)
+                        torch.save(
+                            checkpoint_model.state_dict(),
+                            checkpoint_path,
+                        )
+                        del checkpoint_model
+                    else:
+                        torch.save(
+                            model.state_dict(),
+                            checkpoint_path,
+                        )
+
+                    history["checkpoint_models"].append(
+                        {
+                            "epoch": epoch,
+                            "path": str(checkpoint_path.resolve()),
+                        }
+                    )
 
             history["epoch"].append(epoch)
             history["train_loss"].append(train_loss)
@@ -209,6 +254,9 @@ class Trainer:
         # If restore best, then go back to lowest validation loss state
         if self.restore_best and best_state is not None:
             model.load_state_dict(best_state)
+
+        if has_lora_layers(model):
+            model = merge_lora_weights(model, inplace=True)
 
         history["best_epoch"] = best_epoch
         history["best_valid_loss"] = best_valid_loss

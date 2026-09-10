@@ -5,11 +5,13 @@ from .strategies import (
     MultiHeadCorrectionStrategy,
     MultiHeadStrategy,
     NaiveStrategy,
+    LoRAStrategy
 )
 from .trainer import Trainer
 
 __all__ = [
     "FreezeStrategy",
+    "LoRAStrategy",
     "MultiHeadCorrectionStrategy",
     "MultiHeadStrategy",
     "NaiveStrategy",

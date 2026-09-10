@@ -34,6 +34,15 @@ from .loss import (
     WeightedEnergyForcesNacsDipoleLoss,
     InvariantsWeightedEnergyForcesNacsDipoleLoss,
 )
+from .lora import (
+    LoRADenseLinear,
+    LoRAFCLayer,
+    LoRAO3Linear,
+    has_lora_layers,
+    inject_lora,
+    inject_LoRAs,
+    merge_lora_weights,
+)
 from .models import (
     ExcitedMACE,
     AutoencoderExcitedMACE,
@@ -113,4 +122,11 @@ __all__ = [
     "PermutationInvariantEncoder",
     "AutoencoderExcitedMACE",
     "InvariantsWeightedEnergyForcesNacsDipoleLoss",
+    "LoRADenseLinear",
+    "LoRAFCLayer",
+    "LoRAO3Linear",
+    "has_lora_layers",
+    "inject_lora",
+    "inject_LoRAs",
+    "merge_lora_weights",
 ]
