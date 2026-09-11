@@ -259,6 +259,10 @@ class LoRAStrategy:
                 raise RuntimeError(
                     f"Parameters in unselected layer '{layer_name}' must be frozen."
                 )
+        return transfer_model
+
+
+@dataclass
 class MultiHeadCorrectionStrategy:
     """
     Duplicate a trained autoencoder head for multi-head training.
