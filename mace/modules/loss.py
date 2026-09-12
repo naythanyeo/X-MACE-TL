@@ -8,6 +8,7 @@ import torch
 
 from mace.tools import TensorDict
 from mace.tools.torch_geometric import Batch
+from mace.modules.nac_utils import align_batch_nacs
 
 
 def mean_squared_error_energy(ref: Batch, pred: TensorDict) -> torch.Tensor:
@@ -67,12 +68,30 @@ def weighted_mean_squared_virials(ref: Batch, pred: TensorDict) -> torch.Tensor:
         * torch.square((ref["virials"] - pred["virials"]) / num_atoms)
     )  # []
 
-def phase_rmse_loss(ref: Batch, pred: TensorDict) -> torch.Tensor:
+def old_phase_rmse_loss(ref: Batch, pred: TensorDict) -> torch.Tensor:
+    """
+    OLD NAC LOSS FUNCTION
+    OUTDATED, BAD
+    """
     # nacs: [n_pairs, 3]
     neg = torch.sum(torch.square(ref["nacs"] - pred["nacs"]), dim=-1)  # ||y - ŷ||^2 per pair
     pos = torch.sum(torch.square(ref["nacs"] + pred["nacs"]), dim=-1)  # ||y + ŷ||^2 per pair
     err2 = torch.minimum(pos, neg)                                     # phase-invariant per pair
     return torch.sqrt(torch.mean(err2))    
+
+
+def phase_rmse_loss(ref: Batch, pred: TensorDict) -> torch.Tensor:
+    """
+    Updated NACs RMSE loss function
+    For NACs, the loss we use smooth NACs
+    """
+    nac_residue = align_batch_nacs(
+        pred=pred["smooth_nacs"],
+        ref=ref["smooth_nacs"],
+        ptr=ref.ptr,
+        num_states=ref["energy"].shape[-1]
+    )
+    return torch.sqrt(torch.mean(nac_residue.square()))
 
 def mean_squared_error_forces(ref: Batch, pred: TensorDict) -> torch.Tensor:
     # forces: [n_atoms, 3]
@@ -485,31 +504,31 @@ class InvariantsWeightedEnergyForcesNacsDipoleLoss(torch.nn.Module):
             pred_energy_loss = mean_squared_error_energy(ref, pred)
             reconstructed_energy_loss = reconstruction_error_invariants(ref, pred)
             latent_space_alignment_loss = mean_squared_error_invariants(ref, pred)
-            loss = self.energy_weight * (mean_squared_error_energy(ref, pred) + reconstruction_error_invariants(ref, pred) + mean_squared_error_invariants(ref, pred))
+            loss = self.energy_weight * (pred_energy_loss+reconstructed_energy_loss+latent_space_alignment_loss)
         else:
             pred_energy_loss, reconstructed_energy_loss, latent_space_alignment_loss = None, None, None
         
         if ref["forces"].shape == pred["forces"].shape:
             forces_loss = mean_squared_error_forces(ref, pred)
-            loss += self.forces_weight * mean_squared_error_forces(ref, pred)
+            loss += self.forces_weight * forces_loss
         else:
             forces_loss = None
 
-        if ref["nacs"].shape == pred["nacs"].shape:
-          nacs_loss = phase_rmse_loss(ref, pred)
-          loss += self.nacs_weight * phase_rmse_loss(ref, pred)
+        if ref["smooth_nacs"].shape == pred["smooth_nacs"].shape:
+            smooth_nacs_loss = phase_rmse_loss(ref, pred)
+            loss += self.nacs_weight * smooth_nacs_loss
         else:
-            nacs_loss = None
+            smooth_nacs_loss = None
 
         if ref["dipoles"].shape == pred["dipoles"].shape:
-          dipole_loss = weighted_mean_squared_error_dipole(ref, pred) * 100
-          loss += self.dipoles_weight * weighted_mean_squared_error_dipole(ref, pred) * 100
+            dipole_loss = weighted_mean_squared_error_dipole(ref, pred) * 100
+            loss += self.dipoles_weight * dipole_loss * 100
         else:
             dipole_loss = None
 
         if ref["socs"].shape == pred["socs"].shape:
             socs_loss = phase_rmse_socs(ref, pred)
-            loss += self.socs_weight * phase_rmse_socs(ref, pred)
+            loss += self.socs_weight * socs_loss
         else:
             socs_loss = None
         
@@ -518,7 +537,7 @@ class InvariantsWeightedEnergyForcesNacsDipoleLoss(torch.nn.Module):
             "reconstructed_energy_loss": reconstructed_energy_loss,
             "latent_space_alignment_loss": latent_space_alignment_loss,
             "forces_loss": forces_loss,
-            "nacs_loss": nacs_loss,
+            "smooth_nacs_loss": smooth_nacs_loss,
             "dipole_loss": dipole_loss,
             "socs_loss": socs_loss
         }

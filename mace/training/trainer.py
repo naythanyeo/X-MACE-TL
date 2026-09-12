@@ -13,7 +13,7 @@ from torch_ema import ExponentialMovingAverage
 
 from mace.modules.lora import has_lora_layers, merge_lora_weights
 from mace.tools.torch_geometric import DataLoader
-from mace.modules.loss import phase_rmse_loss
+from mace.modules.nac_utils import align_batch_nacs
 
 from .optimiser import build_optimiser
 
@@ -133,6 +133,8 @@ class Trainer:
             "valid_loss": [],
             "valid_energy_mae": [],
             "valid_force_mae": [],
+            "valid_smooth_nac_phase_mae": [],
+            "valid_raw_nac_phase_mae": [],
             "learning_rate": [],
             "checkpoint_models": [],
             "train_loss_breakdown": [],
@@ -140,9 +142,6 @@ class Trainer:
             "learning_rate": [],
             "learning_rates": [],
         }
-        if compute_nacs:
-            history["valid_nac_phase_rmse"] = []
-            history["valid_nac_abs_mae"] = []
         best_state = None
         best_epoch = 0
         best_valid_loss = float("inf")
@@ -185,18 +184,13 @@ class Trainer:
                     if checkpoint_path.exists():
                         raise FileExistsError(checkpoint_path)
 
-                    if has_lora_layers(model):
-                        checkpoint_model = merge_lora_weights(model, inplace=False)
-                        torch.save(
-                            checkpoint_model.state_dict(),
-                            checkpoint_path,
-                        )
-                        del checkpoint_model
-                    else:
-                        torch.save(
-                            model.state_dict(),
-                            checkpoint_path,
-                        )
+                    checkpoint_state = (
+                        merge_lora_weights(model, inplace=False)
+                        if has_lora_layers(model)
+                        else model.state_dict()
+                    )
+                    torch.save(checkpoint_state, checkpoint_path)
+                    del checkpoint_state
 
                     history["checkpoint_models"].append(
                         {
@@ -211,10 +205,12 @@ class Trainer:
             history["valid_energy_mae"].append(valid_metrics["energy_mae"])
             history["valid_force_mae"].append(valid_metrics["force_mae"])
             if compute_nacs:
-                history["valid_nac_phase_rmse"].append(
-                    valid_metrics["nac_phase_rmse"]
+                history["valid_smooth_nac_phase_mae"].append(
+                    valid_metrics["smooth_nac_phase_mae"]
                 )
-                history["valid_nac_abs_mae"].append(valid_metrics["nac_abs_mae"])
+                history["valid_raw_nac_phase_mae"].append(
+                    valid_metrics["raw_nac_phase_mae"]
+                )
             history["train_loss_breakdown"].append(
                 train_metrics.get("loss_breakdown", {})
             )
@@ -236,8 +232,8 @@ class Trainer:
                 )
                 if compute_nacs:
                     message += (
-                        f" | nac_phase_rmse={valid_metrics['nac_phase_rmse']:.6f}"
-                        f" | nac_abs_mae={valid_metrics['nac_abs_mae']:.6f}"
+                        f" | smooth_nac_phase_mae={valid_metrics['smooth_nac_phase_mae']:.6f}"
+                        f" | raw_nac_phase_mae={valid_metrics['raw_nac_phase_mae']:.6f}"
                     )
                 print(message)
 
@@ -335,13 +331,8 @@ class Trainer:
                 force_count += force_error.numel()
 
                 if compute_nacs:
-                    nac_phase_rmse = phase_rmse_loss(batch, output)
-                    nac_abs_error = torch.abs(output["nacs"] - batch["nacs"])
-
-                    nac_phase_rmse_total += nac_phase_rmse.detach().item()
-                    nac_phase_batch_count += 1
-                    nac_abs_error_total += nac_abs_error.detach().sum().item()
-                    nac_raw_component_count += nac_abs_error.numel()
+                    # TBC 
+                    pass
 
             if training:
                 scaled_loss = loss / self.gradient_accumulation_steps
@@ -380,10 +371,12 @@ class Trainer:
             metrics["energy_mae"] = energy_absolute_error.item() / energy_count
             metrics["force_mae"] = force_absolute_error.item() / force_count
             if compute_nacs:
-                metrics["nac_phase_rmse"] = (
+                metrics["smooth_nac_phase_mae"] = (
+                    # TBC
                     nac_phase_rmse_total / nac_phase_batch_count
                 )
-                metrics["nac_abs_mae"] = (
+                metrics["raw_nac_phase_mae"] = (
+                    # TBC
                     nac_abs_error_total / nac_raw_component_count
                 )
 
