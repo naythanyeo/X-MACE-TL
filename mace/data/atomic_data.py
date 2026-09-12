@@ -37,6 +37,7 @@ class AtomicData(torch_geometric.data.Data):
     stress: torch.Tensor
     virials: torch.Tensor
     nacs: torch.Tensor
+    smooth_nacs: torch.Tensor
     socs: torch.Tensor
     dipole: torch.Tensor
     charges: torch.Tensor
@@ -69,6 +70,7 @@ class AtomicData(torch_geometric.data.Data):
         dipoles: Optional[torch.Tensor],  # [, 3]
         charges: Optional[torch.Tensor],  # [n_nodes, ]
         nacs: Optional[torch.Tensor],
+        smooth_nacs: Optional[torch.Tensor],
         socs: Optional[torch.Tensor]
     ):
         # Check shapes
@@ -92,6 +94,7 @@ class AtomicData(torch_geometric.data.Data):
         assert virials is None or virials.shape == (1, 3, 3)
         assert dipoles is None or dipoles.shape[-1] == 3
         assert nacs is None or nacs.shape[-1] == 3
+        assert smooth_nacs is None or smooth_nacs.shape[-1] == 3
         assert charges is None or charges.shape == (num_nodes,)
         # Aggregate data
         data = {
@@ -116,6 +119,7 @@ class AtomicData(torch_geometric.data.Data):
             "virials": virials,
             "dipoles": dipoles,
             "nacs": nacs,
+            "smooth_nacs": smooth_nacs,
             "socs": socs,
             "charges": charges,
         }
@@ -222,6 +226,11 @@ class AtomicData(torch_geometric.data.Data):
             if config.nacs is not None
             else None
         )
+        smooth_nacs = (
+            torch.tensor(config.smooth_nacs, dtype=torch.get_default_dtype())
+            if config.smooth_nacs is not None
+            else None
+        )
         socs = (
             torch.tensor(config.socs, dtype=torch.get_default_dtype())
             if config.socs is not None
@@ -254,6 +263,7 @@ class AtomicData(torch_geometric.data.Data):
             virials=virials,
             dipoles=dipoles,
             nacs=nacs,
+            smooth_nacs=smooth_nacs,
             socs=socs,
             charges=charges,
         )
