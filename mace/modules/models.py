@@ -35,6 +35,7 @@ from .utils import (
     get_outputs,
     get_symmetric_displacement,
 )
+from .nac_utils import smooth_to_raw_nacs
 
 # pylint: disable=C0302
 
@@ -1015,7 +1016,7 @@ class AutoencoderExcitedMACE(torch.nn.Module):
         """
         # Accumulated values 
         decoded_energy = None
-        total_nacs = None
+        total_smooth_nacs = None
         total_socs = None
         # One value only
         invariant_vals = None
@@ -1027,7 +1028,7 @@ class AutoencoderExcitedMACE(torch.nn.Module):
         for model_head_idx, head_block in enumerate(self.autoencoder_heads):
             # Only pass through if the route deems it 1
             if route[model_head_idx] == 1:
-                head_energy, head_nacs, head_socs, head_invariants = head_block(
+                head_energy, head_smooth_nacs, head_socs, head_invariants = head_block(
                     node_feats_list,
                     data["batch"],
                     num_graphs
@@ -1035,11 +1036,11 @@ class AutoencoderExcitedMACE(torch.nn.Module):
                 # For the first head, energies are set to same type as head
                 if decoded_energy is None:
                     decoded_energy = head_energy
-                    total_nacs = head_nacs
+                    total_smooth_nacs = head_smooth_nacs
                     total_socs = head_socs
                 else:
                     decoded_energy = decoded_energy + head_energy
-                    total_nacs = total_nacs + head_nacs
+                    total_smooth_nacs = total_smooth_nacs + head_smooth_nacs
                     total_socs = total_socs + head_socs
                 # Only keep the invariant vals coresponding to the head, not accumulated
                 if model_head_idx == head:
@@ -1047,6 +1048,16 @@ class AutoencoderExcitedMACE(torch.nn.Module):
 
         # Add on E0s energy
         total_energies = decoded_energy + e0.unsqueeze(-1)
+
+        # Convert smooth NACs to raw NACs
+        if self.compute_nacs:
+            total_nacs = smooth_to_raw_nacs(
+                total_smooth_nacs,
+                total_energies,
+                data["batch"],
+            )
+        else:
+            total_nacs = None
 
         # Outputs
         forces, virials, stress, hessian = get_outputs(
@@ -1065,6 +1076,7 @@ class AutoencoderExcitedMACE(torch.nn.Module):
             "energy": total_energies,
             "invariant_vals": invariant_vals,
             "socs": total_socs,
+            "smooth_nacs": total_smooth_nacs,
             "nacs": total_nacs,
             "dipoles": total_energies.new_empty((0,)),
             "forces": forces,
