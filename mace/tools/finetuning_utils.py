@@ -126,9 +126,44 @@ def load_foundations(
                     )
                 )
 
-        product_linear_weight = model_foundations.products[i].linear.weight.clone()
-        if model.products[i].linear.weight.shape == product_linear_weight.shape:
-            model.products[i].linear.weight = torch.nn.Parameter(product_linear_weight)
+        product_linear_weight = (
+            model_foundations.products[i].linear.weight.detach().clone()
+        )
+        target_linear_weight = model.products[i].linear.weight
+
+        # If the product paramters match, can directly copy over 
+        if target_linear_weight.shape == product_linear_weight.shape:
+            model.products[i].linear.weight = torch.nn.Parameter(
+                product_linear_weight
+            )
+        # Special case where we just added a new vector channel for NACs 
+        # in the second interaction block. ANI only has 192x0e for the 
+        # second layer (original MACE only preserved scalar channel)
+        # For NAC training we preserved 192x0e+192x1o+192x2e 
+        elif (
+            # Check that the second layer has 3x number of paramters 
+            # Technically could work for other use case but we restrict
+            # to this specific model params JIC 
+            # For other model types it will just skip if its not a match
+            i == 1
+            and target_linear_weight.numel()
+            == 3 * product_linear_weight.numel()
+        ):
+            # Target weights have the shape of the 1e 2o channels
+            target_vector_tensor_weights = (
+                target_linear_weight[product_linear_weight.numel():]
+                .detach()
+                .clone()
+            )
+            # Concat both layers then transfer to model
+            model.products[i].linear.weight = torch.nn.Parameter(
+                torch.cat(
+                    (
+                        product_linear_weight,
+                        target_vector_tensor_weights,
+                    )
+                )
+            )
     
     model.scale_shift = model_foundations.scale_shift
 
