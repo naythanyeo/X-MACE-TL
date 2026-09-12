@@ -17,6 +17,33 @@ from itertools import product
 import numpy as np
 import torch
 
+
+def smooth_to_raw_nacs(
+    smooth_nacs: torch.Tensor,
+    energies: torch.Tensor,
+    batch: torch.Tensor,
+    gap_floor: float = 1e-8, # Follows current X MACE calculator default
+) -> torch.Tensor:
+    """
+    Convert graph-level smooth NACs into atom-level raw NACs.
+    """
+    num_states = energies.shape[-1]
+    state_i, state_j = torch.triu_indices(
+        num_states,
+        num_states,
+        offset=1,
+        device=energies.device,
+        dtype=energies.dtype
+    )
+    # Follow clamping for minimum value 
+    energy_gaps = torch.abs(
+        energies[:, state_j] - energies[:, state_i]
+    ).clamp_min(gap_floor)
+    # Expand based on number of atoms 
+    node_energy_gaps = energy_gaps[batch]
+    return smooth_nacs / node_energy_gaps.unsqueeze(-1)
+
+
 def enumerate_nac_phase_signs(num_states):
     """
     We first find all unique electronic-state phase assignments.
@@ -117,4 +144,4 @@ def align_batch_nacs(pred, ref, ptr, num_states):
         )
 
     # Return the residual of the geometries in that batch
-    return torch.stack(geometry_residuals)
+    return torch.cat(geometry_residuals, dim=0)
