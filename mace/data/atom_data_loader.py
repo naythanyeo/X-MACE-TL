@@ -97,13 +97,16 @@ class AtomDataLoaderBuilder:
         "casscf": None,
         "caspt2": "casscf",
     }
+
+    Expected NAC inputs are RAW NACs 
+    all references to nacs refer to RAW ones
+    Smooth NACs are computed separately and labelled explicitly as smooth_nacs
     """
     cutoff: float = 5.0  # Max bond length
-    # xyz file labels (ignore nac and socs)
     energy_key: str = "REF_energy"
     energy_difference_key: str = "REF_raw_energy_differences"
     forces_key: str = "REF_forces"
-    nacs_key: str = "REF_nacs"
+    nacs_key: str = "REF_nacs" # RAW NACS
     E0s: Optional[
         Union[Dict[str, float], Dict[str, Dict[str, float]]]
     ] = None

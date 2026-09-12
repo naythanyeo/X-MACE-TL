@@ -22,6 +22,7 @@ Stress = np.ndarray  # [6, ], [3,3], [9, ]
 Virials = np.ndarray  # [6, ], [3,3], [9, ]
 Charges = np.ndarray  # [..., 1]
 Nacs = np.ndarray #[...,...,3]
+Smooth_nacs = np.ndarray #[...,...,3]
 Socs = np.ndarray
 Cell = np.ndarray  # [3,3]
 Pbc = tuple  # (3,)
@@ -45,6 +46,7 @@ class Configuration:
     cell: Optional[Cell] = None
     pbc: Optional[Pbc] = None
     nacs: Optional[Nacs] = None
+    smooth_nacs: Optional[Smooth_nacs] = None
     socs: Optional[Socs] = None
     weight: float = 1.0  # weight of config in loss
     energy_weight: float = 1.0  # weight of config energy in loss
@@ -137,7 +139,7 @@ def config_from_atoms(
     virials_key="REF_virials",
     dipoles_key="REF_dipoles",
     charges_key="REF_charges",
-    nacs_key="REF_nacs",
+    nacs_key="REF_nacs", # RAW NACS
     socs_key="REF_socs",
     config_type_weights: Dict[str, float] = None,
 ) -> Configuration:
@@ -152,6 +154,15 @@ def config_from_atoms(
     nacs = atoms.info.get(nacs_key, None)
     socs = atoms.info.get(socs_key, None)
     dipoles = atoms.info.get(dipoles_key, None)  # Debye
+
+    # Add in smooth NACs labels 
+    if nacs is not None:
+        if energy is None:
+            raise ValueError("Energies must be specified if NACs are specified")
+        smooth_nacs = get_smooth_nacs(raw_nacs=nacs, energy=energy)
+    else:
+        smooth_nacs = None
+
     # Charges default to 0 instead of None if not found
     charges = atoms.arrays.get(charges_key, np.zeros(len(atoms)))  # atomic unit
     atomic_numbers = np.array(
@@ -188,6 +199,8 @@ def config_from_atoms(
     if nacs is None:
         nacs = np.zeros(3)
         nacs_weight = 0.0
+    if smooth_nacs is None:
+        smooth_nacs = np.zeros(3)
     if socs is None:
         socs = np.zeros(3)
         socs_weight = 0.0
@@ -203,6 +216,7 @@ def config_from_atoms(
         dipoles=dipoles,
         charges=charges,
         nacs=nacs,
+        smooth_nacs=smooth_nacs,
         socs=socs,
         weight=weight,
         energy_weight=energy_weight,
@@ -428,3 +442,22 @@ def save_configurations_as_HDF5(configurations: Configurations, _, h5_file) -> N
 
 def write_value(value):
     return value if value is not None else "None"
+
+
+"""
+Helper function to convert RAW to Smooth NACs
+By default inputs labelled nacs are RAW nacs
+smooth NACs are explicitly labelled as smooth_nacs
+
+Convert raw non-adiabatic couplings into the smooth quantities used as the
+training target. NACs scale as 1/(En - Em) and diverge at conical
+intersections, so multiplying by the energy gap removes the discontinuity.
+Invert by dividing by `gaps` to recover the physical couplings.
+"""
+def get_smooth_nacs(raw_nacs, energy):
+    E = energy.reshape(-1)                    # (n_states,)
+    i, j = np.triu_indices(E.size, k=1)         # pair order: (0,1), (0,2), (1,2), ...
+    gaps = np.abs(E[j] - E[i])                  # (n_pairs,)
+    # raw -> smooth (training target)
+    smooth_nacs = raw_nacs * gaps[None, :, None]    # (n_atoms, n_pairs, 3)
+    return smooth_nacs
