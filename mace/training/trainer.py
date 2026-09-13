@@ -5,7 +5,6 @@ from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Union
-from pathlib import Path
 
 import torch
 from torch.optim.lr_scheduler import ReduceLROnPlateau
@@ -138,9 +137,7 @@ class Trainer:
             "learning_rate": [],
             "checkpoint_models": [],
             "train_loss_breakdown": [],
-            "valid_loss_breakdown": [],
-            "learning_rate": [],
-            "learning_rates": [],
+            "valid_loss_breakdown": []
         }
         best_state = None
         best_epoch = 0
@@ -183,9 +180,10 @@ class Trainer:
                     )
                     if checkpoint_path.exists():
                         raise FileExistsError(checkpoint_path)
-
+                    
+                    # For each checkpoint state, if lora then fold it first before saving
                     checkpoint_state = (
-                        merge_lora_weights(model, inplace=False)
+                        merge_lora_weights(model, inplace=False).state_dict()
                         if has_lora_layers(model)
                         else model.state_dict()
                     )
@@ -245,6 +243,7 @@ class Trainer:
         if self.restore_best and best_state is not None:
             model.load_state_dict(best_state)
 
+        # At the end of training, fold the lora weights into base layer
         if has_lora_layers(model):
             model = merge_lora_weights(model, inplace=True)
 
@@ -269,14 +268,14 @@ class Trainer:
         total_loss = 0.0
         num_batches = 0
         loss_breakdown = {}
-        energy_absolute_error = None
-        force_absolute_error = None
+        energy_total_error = None
+        force_total_error = None
+        smooth_nac_total_error = None
+        raw_nac_total_error = None
         energy_count = 0
         force_count = 0
-        nac_phase_rmse_total = 0.0
-        nac_phase_batch_count = 0
-        nac_abs_error_total = 0.0
-        nac_raw_component_count = 0
+        nac_count = 0
+
 
         base_model = model.module if hasattr(model, "module") else model
         prepare_outputs = getattr(base_model, "prepare_loss_outputs", None)
@@ -312,28 +311,52 @@ class Trainer:
 
             if test:
                 """
-                Include test mode to record and store the MAE for energies and forces
+                Include test mode to record and store the MAE for energies forces and MAE 
                 Test is only called during the validation steps
+                Errors are calculated across all batches in this loop 
                 """
-                energy_error = torch.abs(output["energy"] - batch["energy"])
-                force_error = torch.abs(output["forces"] - batch["forces"])
-                batch_energy_error = energy_error.detach().sum()
-                batch_force_error = force_error.detach().sum()
+                energy_error_terms = torch.abs(output["energy"] - batch["energy"]).detach()
+                force_error_terms = torch.abs(output["forces"] - batch["forces"]).detach()
 
-                if energy_absolute_error is None:
-                    energy_absolute_error = batch_energy_error
-                    force_absolute_error = batch_force_error
+                if energy_total_error is None:
+                    energy_total_error = energy_error_terms.sum()
+                    force_total_error = force_error_terms.sum()
                 else:
-                    energy_absolute_error += batch_energy_error
-                    force_absolute_error += batch_force_error
-
-                energy_count += energy_error.numel()
-                force_count += force_error.numel()
+                    energy_total_error += energy_error_terms.sum()
+                    force_total_error += force_error_terms.sum()
+                # Number of total terms 
+                energy_count += energy_error_terms.numel()
+                force_count += force_error_terms.numel()
 
                 if compute_nacs:
-                    # TBC 
-                    pass
+                    # Align batches and get absolute error 
+                    smooth_nac_residue = align_batch_nacs(
+                        pred=output["smooth_nacs"],
+                        ref=batch["smooth_nacs"],
+                        ptr=batch.ptr,
+                        num_states=batch["energy"].shape[-1]
+                    )
+                    smooth_nac_error_terms = torch.abs(smooth_nac_residue).detach()
+                    
+                    raw_nac_residue = align_batch_nacs(
+                        pred=output["nacs"],
+                        ref=batch["nacs"],
+                        ptr=batch.ptr,
+                        num_states=batch["energy"].shape[-1]
+                    )
+                    raw_nac_error_terms = torch.abs(raw_nac_residue).detach()
 
+                    if smooth_nac_total_error is None:
+                        smooth_nac_total_error = smooth_nac_error_terms.sum()
+                        raw_nac_total_error = raw_nac_error_terms.sum()
+                    else:
+                        smooth_nac_total_error += smooth_nac_error_terms.sum()
+                        raw_nac_total_error += raw_nac_error_terms.sum()
+
+                    # Smooth and raw have same number of terms
+                    nac_count += smooth_nac_error_terms.numel()
+
+            # Within each batch, if training then take steps
             if training:
                 scaled_loss = loss / self.gradient_accumulation_steps
                 scaled_loss.backward()
@@ -365,20 +388,16 @@ class Trainer:
             raise ValueError("DataLoader is empty.")
 
         metrics = {"loss": total_loss / num_batches}
+        # In case loss fn does not have breakdown implemented
         if loss_breakdown:
             metrics["loss_breakdown"] = loss_breakdown
-        if test:
-            metrics["energy_mae"] = energy_absolute_error.item() / energy_count
-            metrics["force_mae"] = force_absolute_error.item() / force_count
-            if compute_nacs:
-                metrics["smooth_nac_phase_mae"] = (
-                    # TBC
-                    nac_phase_rmse_total / nac_phase_batch_count
-                )
-                metrics["raw_nac_phase_mae"] = (
-                    # TBC
-                    nac_abs_error_total / nac_raw_component_count
-                )
 
+        # Get the metrics across batches 
+        if test:
+            metrics["energy_mae"] = energy_total_error.item() / energy_count
+            metrics["force_mae"] = force_total_error.item() / force_count
+            if compute_nacs:
+                metrics["smooth_nac_phase_mae"] = smooth_nac_total_error.item() / nac_count
+                metrics["raw_nac_phase_mae"] = raw_nac_total_error.item() / nac_count
 
         return metrics

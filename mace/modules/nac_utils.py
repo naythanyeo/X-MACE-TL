@@ -32,8 +32,7 @@ def smooth_to_raw_nacs(
         num_states,
         num_states,
         offset=1,
-        device=energies.device,
-        dtype=energies.dtype
+        device=energies.device
     )
     # Follow clamping for minimum value 
     energy_gaps = torch.abs(
