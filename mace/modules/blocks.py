@@ -1062,3 +1062,32 @@ class DifferenceDecoder(torch.nn.Module):
             [ground_diff, excited_diff],
             dim=-1
         )
+
+@compile_mode("script")
+class PermutationInvariantLinearDecoder(torch.nn.Module):
+    """
+    Alternative Decoder to the matrix version 
+    Still uses the autoencoder 16D invariant space but does not return the
+    roots using Hermitian Matrix. Decoder directly outputs the values
+    """
+    def __init__(self, latent_dim=16, hidden_dim=128, n_energies=3):
+        super().__init__()
+
+        self.n_energies = n_energies
+        self.latent_dim = latent_dim
+
+        # Sequentially apply fully connected layers with ELU activation
+        self.decoder_nn = torch.nn.Sequential(
+            torch.nn.Linear(latent_dim, hidden_dim),
+            torch.nn.ELU(),
+            torch.nn.Linear(hidden_dim, hidden_dim),
+            torch.nn.ELU(),
+            torch.nn.Linear(hidden_dim, hidden_dim),
+            torch.nn.ELU(),
+            torch.nn.Linear(hidden_dim, hidden_dim),
+            torch.nn.ELU(),
+            torch.nn.Linear(hidden_dim, n_energies)  # Output layer without activation
+        )
+
+    def forward(self, z):
+        return self.decoder_nn(z)

@@ -19,6 +19,7 @@ from e3nn import o3
 from mace import modules
 from mace.data.atom_data_loader import AtomDataMetadata
 from mace.tools.finetuning_utils import load_foundations
+from mace.modules.blocks import PermutationInvariantLinearDecoder
 
 from .model_presets import AUTOENCODER_PRESETS
 
@@ -151,12 +152,17 @@ def initialise_autoencoder(
     distance_transform: Optional[str] = None,
     pair_repulsion: Optional[bool] = None,
     load_base: Optional[str] = None,
+    energy_decoder: str = "matrix"
 ) -> modules.AutoencoderExcitedMACE:
     # Verify that preset selected is available 
     # Currently only default or lightweight
     if preset not in AUTOENCODER_PRESETS:
         valid_presets = ", ".join(AUTOENCODER_PRESETS)
         raise ValueError(f"Unknown preset '{preset}'. Choose from: {valid_presets}.")
+
+    # Verify the decoder options
+    if energy_decoder not in ["matrix", "direct"]:
+        raise ValueError("energy_decoder must be 'matrix' or 'direct'")
 
     # Use the default preset settings
     settings = AUTOENCODER_PRESETS[preset].copy()
@@ -214,6 +220,16 @@ def initialise_autoencoder(
         radial_type=settings["radial_type"],
     )
 
+    # Option to change the decoder to be direct instead of matrix 
+    if energy_decoder == "direct":
+        model.autoencoder_heads[0].perm_decoder = (
+            PermutationInvariantLinearDecoder(
+                latent_dim=settings["latent_dim"],
+                n_energies=metadata.n_energies
+            )
+        )
+
+    # Load in foundation model parameters 
     if load_base is not None:
         base_model = _load_base_model(load_base)
         _validate_parameters(
