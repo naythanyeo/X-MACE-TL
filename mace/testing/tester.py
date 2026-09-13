@@ -10,7 +10,7 @@ import torch
 
 from mace.tools.torch_geometric import DataLoader
 
-from .metrics import mean_absolute_error, phase_root_mean_squared_error
+from .metrics import mean_absolute_error, phase_mean_absolute_error
 
 
 @dataclass
@@ -42,8 +42,12 @@ class Tester:
         ref_forces = []
         pred_nacs = []
         ref_nacs = []
+        pred_smooth_nacs = []
+        ref_smooth_nacs = []
+        nac_ptr = [0]
 
         # Loop through all the batches to get combined preds
+        # NAC pointer is stored because here we group all predictions from every batch
         for batch in test_loader:
             batch = batch.to(self.device)
             output = model(batch.to_dict(), training=False, compute_force=True)
@@ -55,6 +59,10 @@ class Tester:
             if compute_nacs:
                 pred_nacs.append(output["nacs"].detach().cpu())
                 ref_nacs.append(batch.nacs.detach().cpu())
+                pred_smooth_nacs.append(output["smooth_nacs"].detach().cpu())
+                ref_smooth_nacs.append(batch.smooth_nacs.detach().cpu())
+                batch_ptr = batch.ptr.detach().cpu().numpy()
+                nac_ptr.extend((nac_ptr[-1] + batch_ptr[1:]).tolist())
 
         self.pred_energies = torch.cat(pred_energies).numpy()
         self.ref_energies = torch.cat(ref_energies).numpy()
@@ -64,10 +72,16 @@ class Tester:
         if compute_nacs:
             self.pred_nacs = torch.cat(pred_nacs).numpy()
             self.ref_nacs = torch.cat(ref_nacs).numpy()
-            return self.pred_energies, self.pred_forces, self.pred_nacs
+            self.pred_smooth_nacs = torch.cat(pred_smooth_nacs).numpy()
+            self.ref_smooth_nacs = torch.cat(ref_smooth_nacs).numpy()
+            self.nac_ptr = np.asarray(nac_ptr, dtype=np.int64)
+            return self.pred_energies, self.pred_forces, self.pred_nacs, self.pred_smooth_nacs
 
         self.pred_nacs = None
         self.ref_nacs = None
+        self.pred_smooth_nacs = None
+        self.ref_smooth_nacs = None
+        self.nac_ptr = None
         return self.pred_energies, self.pred_forces
     """
     Energies: (N_geoms, N_states)
@@ -90,25 +104,43 @@ class Tester:
             self.pred_forces, self.ref_forces, axis=(0, 2)
         )
 
-    def _get_nac_results(self) -> tuple[np.ndarray, np.ndarray]:
-        if self.pred_nacs is None or self.ref_nacs is None:
-            raise ValueError(
-                "Run run_test(..., compute_nacs=True) before requesting NAC metrics."
+    def get_smooth_nac_phase_mae(self) -> float:
+        return float(
+            phase_mean_absolute_error(
+                predicted=getattr(self, "pred_smooth_nacs", None),
+                reference=getattr(self, "ref_smooth_nacs", None),
+                ptr=self.nac_ptr,
+                num_states=self.ref_energies.shape[-1],
+                axis=None
             )
-        return self.pred_nacs, self.ref_nacs
+        )
 
-    def get_nac_abs_mae(self) -> float:
-        pred_nacs, ref_nacs = self._get_nac_results()
-        return float(mean_absolute_error(pred_nacs, ref_nacs))
+    def get_smooth_nac_phase_mae_by_pair(self) -> float:
+        return phase_mean_absolute_error(
+            predicted=getattr(self, "pred_smooth_nacs", None),
+            reference=getattr(self, "ref_smooth_nacs", None),
+            ptr=self.nac_ptr,
+            num_states=self.ref_energies.shape[-1],
+            axis=(0, 2)
+        )
+    
 
-    def get_nac_abs_mae_by_pair(self) -> np.ndarray:
-        pred_nacs, ref_nacs = self._get_nac_results()
-        return mean_absolute_error(pred_nacs, ref_nacs, axis=(0, 2))
-
-    def get_nac_phase_rmse(self) -> float:
-        pred_nacs, ref_nacs = self._get_nac_results()
-        return float(phase_root_mean_squared_error(pred_nacs, ref_nacs))
-
-    def get_nac_phase_rmse_by_pair(self) -> np.ndarray:
-        pred_nacs, ref_nacs = self._get_nac_results()
-        return phase_root_mean_squared_error(pred_nacs, ref_nacs, axis=0)
+    def get_raw_nac_phase_mae(self) -> float:
+        return float(
+            phase_mean_absolute_error(
+                predicted=getattr(self, "pred_nacs", None),
+                reference=getattr(self, "ref_nacs", None),
+                ptr=self.nac_ptr,
+                num_states=self.ref_energies.shape[-1],
+                axis=None
+            )
+        )
+    
+    def get_raw_nac_phase_mae_by_pair(self) -> float:
+        return phase_mean_absolute_error(
+            predicted=getattr(self, "pred_nacs", None),
+            reference=getattr(self, "ref_nacs", None),
+            ptr=self.nac_ptr,
+            num_states=self.ref_energies.shape[-1],
+            axis=(0, 2)
+        )

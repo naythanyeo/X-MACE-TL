@@ -80,9 +80,9 @@ def old_phase_rmse_loss(ref: Batch, pred: TensorDict) -> torch.Tensor:
     return torch.sqrt(torch.mean(err2))    
 
 
-def phase_rmse_loss(ref: Batch, pred: TensorDict) -> torch.Tensor:
+def phase_mse_loss(ref: Batch, pred: TensorDict) -> torch.Tensor:
     """
-    Updated NACs RMSE loss function
+    Updated NACs MSE loss function
     For NACs, the loss we use smooth NACs
     """
     nac_residue = align_batch_nacs(
@@ -91,7 +91,7 @@ def phase_rmse_loss(ref: Batch, pred: TensorDict) -> torch.Tensor:
         ptr=ref.ptr,
         num_states=ref["energy"].shape[-1]
     )
-    return torch.sqrt(torch.mean(nac_residue.square()))
+    return torch.mean(nac_residue.square())
 
 def mean_squared_error_forces(ref: Batch, pred: TensorDict) -> torch.Tensor:
     # forces: [n_atoms, 3]
@@ -515,7 +515,7 @@ class InvariantsWeightedEnergyForcesNacsDipoleLoss(torch.nn.Module):
             forces_loss = None
 
         if ref["smooth_nacs"].shape == pred["smooth_nacs"].shape:
-            smooth_nacs_loss = phase_rmse_loss(ref, pred)
+            smooth_nacs_loss = phase_mse_loss(ref, pred)
             loss += self.nacs_weight * smooth_nacs_loss
         else:
             smooth_nacs_loss = None
