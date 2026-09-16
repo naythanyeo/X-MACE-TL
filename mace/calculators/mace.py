@@ -41,6 +41,7 @@ class MACECalculator(Calculator):
         length_units_to_A: float = 1.0,
         default_dtype: str = "",
         charges_key: str = "Qs",
+        head: int = None,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -81,16 +82,31 @@ class MACECalculator(Calculator):
         # Where to find atomic charges in Atoms for building graphs
         self.charges_key = charges_key
 
+        # Load in the head data
+        # Expects the new models with autoencoder heads 
+        # Can load in heads manually from the sharc inputs
+        num_heads = self.model.head_routes.shape[0]
+        # If head is specified manually then use it, might just be the LF data 
+        # Eg if two heads are trained, can use same model to run sharc with LF head
+        self.head_index = num_heads - 1 if head is None else head
+
     def _atoms_to_batch(self, atoms):
         cfg = data.config_from_atoms(atoms, charges_key=self.charges_key)
+        atomic_data = data.AtomicData.from_config(cfg, z_table=self.z_table, cutoff=self.r_max)
+
+        # Add in the head info as this isn't part of the model 
+        atomic_data.head = torch.tensor(self.head_index, dtype=torch.long)
+
+        # Add in the dataloader
         loader = torch_geometric.dataloader.DataLoader(
-            dataset=[data.AtomicData.from_config(cfg, z_table=self.z_table, cutoff=self.r_max)],
+            dataset=[atomic_data],
             batch_size=1,
             shuffle=False,
             drop_last=False,
         )
-        batch = next(iter(loader)).to(self.device)
-        return batch
+
+        # Return one batch
+        return next(iter(loader)).to(self.device)
 
     def calculate(self, atoms=None, properties=None, system_changes=all_changes):
         super().calculate(atoms)
@@ -116,8 +132,12 @@ class MACECalculator(Calculator):
         )
 
         # SOCs & NACs: pass through as-is (units model-defined)
-        socs = out["socs"].detach().to("cpu").numpy()
-        nacs = out["nacs"].detach().to("cpu").numpy()
+        socs = None
+        nacs = None
+        if self.model.compute_socs:
+            socs = out["socs"].detach().to("cpu").numpy()
+        if self.model.compute_nacs:
+            nacs = out["nacs"].detach().to("cpu").numpy()
 
         self.results = {
             "energy": energy,          # (n_states,)

@@ -28,6 +28,7 @@ class SharcCalculator:
         distance_unit: str,
         n_states: Dict[str, int] = None,
         properties: List[str] = None,
+        head: int = None
     ):
 
         distance_units = {"Ang": 0.529177249, "Bohr": 1.0}
@@ -49,7 +50,7 @@ class SharcCalculator:
         self.soc_idx = np.triu_indices(self.n_total_states, 1)
         self.n_atoms = len(atom_types)
 
-        self.calc = MACECalculator(model_paths=model_path, n_energies=self.n_total_states, device=device)
+        self.calc = MACECalculator(model_paths=model_path, n_energies=self.n_total_states, device=device, head=head)
 
     def calculate(
         self, sharc_coords: Union[np.ndarray, torch.Tensor]
@@ -69,6 +70,8 @@ class SharcCalculator:
         states_n = self.n_states["n_singlets"] + self.n_states["n_triplets"]
         mace_output["energy"] = mace_output["energy"][0][:states_n] * self.energy_unit_conversion
         mace_output["forces"] = mace_output["forces"][:,:states_n,:] * self.energy_unit_conversion * self.distance_unit_conversion
+        if "nac" in self.properties:
+            mace_output["nacs"] = mace_output["nacs"] * self.distance_unit_conversion
         qm_h = self.get_qm(mace_output)
         return qm_h
 
@@ -89,7 +92,7 @@ class SharcCalculator:
         qm_out["grad"] = np.einsum("ijk->jik", -mace_output["forces"]).tolist()
 
         if "nac" in self.properties:
-            nacs_v = np.einsum("ijk->jik", mace_output["nac"])
+            nacs_v = np.einsum("ijk->jik", mace_output["nacs"])
             nacs_m = np.zeros((states, states, self.n_atoms, 3))
 
             if n_triplets == 0:

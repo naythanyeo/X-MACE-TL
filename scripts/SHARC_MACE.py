@@ -59,15 +59,17 @@ class SHARC_MACE(SHARC_FAST):
                 "energy_unit": str,
                 "distance_unit": str,
                 "paddingstates": bool,
+                "head": int
                 }
         QMin.template.data={
                 "model_file": None,
                 "cutoff": 5.0,
-                "properties": ["energy", "forces"],
+                "properties": ["energy", "forces", "nac"],
                 "device": "cpu",
                 "energy_unit": "eV",
                 "distance_unit": "Ang",
                 "paddingstates": False,
+                "head": None
                 }
 
         self.spainnulator = None
@@ -167,7 +169,8 @@ class SHARC_MACE(SHARC_FAST):
             energy_unit=self.QMin.template["energy_unit"],
             distance_unit=self.QMin.template["distance_unit"],
             n_states={"n_singlets": self.QMin.molecule["states"][0], "n_triplets": 0},
-            properties=self.QMin.template["properties"]
+            properties=self.QMin.template["properties"],
+            head=self.QMin.template["head"]
         )
 
     def create_restart_files(self):
