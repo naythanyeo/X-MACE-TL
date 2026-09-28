@@ -7,6 +7,7 @@ with the implemented strategies. Eg frozen layers etc
 
 from copy import deepcopy
 from dataclasses import dataclass
+from fnmatch import fnmatchcase
 import math
 from numbers import Real
 from typing import Dict, Tuple, Optional
@@ -27,15 +28,24 @@ from mace.modules.lora import (
 )
 
 
-model_layers = [
-    "node_embedding",
-    "perm_encoder",
-    "perm_decoder",
-    "interactions",
-    "products",
-    "readouts",
-    "invariant_readouts",
-]
+model_layers: Dict[str, Tuple[str, ...]] = {
+    "full_graph": ("node_embedding", "radial_embedding", "interactions", "products"),
+    "node": ("node_embedding",),
+    "interactions": ("interactions",),
+    "products": ("products",),
+    "encoder": ("autoencoder_heads.*.perm_encoder",),
+    "decoder": ("autoencoder_heads.*.perm_decoder",),
+    "invariant_readouts": ("autoencoder_heads.*.invariant_readouts",),
+    "nac_readouts": ("autoencoder_heads.*.nac_readouts",),
+    "soc_readouts": ("autoencoder_heads.*.socs_readouts",),
+    "readouts": (
+        "autoencoder_heads.*.invariant_readouts",
+        "autoencoder_heads.*.nac_readouts",
+        "autoencoder_heads.*.socs_readouts",
+    ),
+    "all_heads": ("autoencoder_heads",),
+    "head0": ("autoencoder_heads.0",),
+}
 
 
 def _copy_model(model: torch.nn.Module) -> torch.nn.Module:
@@ -106,25 +116,65 @@ class FreezeStrategy:
     def __post_init__(self) -> None:
         if not isinstance(self.frozen_layers, tuple):
             raise TypeError("frozen_layers must be a tuple of layer names.")
-
-        invalid_layers = [
-            layer for layer in self.frozen_layers if layer not in model_layers
-        ]
-        if invalid_layers:
-            raise ValueError(
-                f"frozen_layers must contain only layers from {model_layers}."
-            )
-
-        if set(self.frozen_layers) == set(model_layers):
-            raise ValueError("Every trainable model layer cannot be frozen.")
+        if not all(isinstance(layer, str) and layer for layer in self.frozen_layers):
+            raise TypeError("Each frozen layer must be a non-empty string.")
+        if len(self.frozen_layers) != len(set(self.frozen_layers)):
+            raise ValueError("frozen_layers cannot contain duplicate entries.")
 
     def apply(self, model: torch.nn.Module) -> torch.nn.Module:
         transfer_model = _copy_model(model)
 
-        for name, parameter in transfer_model.named_parameters():
-            for layer in self.frozen_layers:
-                if name == layer or name.startswith(f"{layer}."):
-                    parameter.requires_grad_(False)
+        modules = dict(transfer_model.named_modules())
+        parameters = dict(transfer_model.named_parameters())
+        parameters_to_freeze = {}
+
+        for layer in self.frozen_layers:
+            if layer in model_layers:
+                module_patterns = model_layers[layer]
+                module_names = {
+                    name
+                    for pattern in module_patterns
+                    for name in modules
+                    if fnmatchcase(name, pattern)
+                }
+                matched_parameters = {
+                    name: parameter
+                    for name, parameter in parameters.items()
+                    if parameter.requires_grad
+                    and any(
+                        name == module_name or name.startswith(f"{module_name}.")
+                        for module_name in module_names
+                    )
+                }
+            elif layer in modules:
+                matched_parameters = {
+                    name: parameter
+                    for name, parameter in parameters.items()
+                    if parameter.requires_grad
+                    and (name == layer or name.startswith(f"{layer}."))
+                }
+            elif layer in parameters:
+                parameter = parameters[layer]
+                matched_parameters = {layer: parameter} if parameter.requires_grad else {}
+            else:
+                aliases = ", ".join(sorted(model_layers))
+                raise ValueError(
+                    f"Unknown frozen layer '{layer}'. Accepted aliases: {aliases}. "
+                    "You can also use an exact module path from model.named_modules() "
+                    "or parameter name from model.named_parameters()."
+                )
+
+            if not matched_parameters:
+                raise ValueError(
+                    f"Frozen layer '{layer}' did not match any trainable parameters."
+                )
+            parameters_to_freeze.update(matched_parameters)
+
+        for parameter in parameters_to_freeze.values():
+            parameter.requires_grad_(False)
+
+        if not any(parameter.requires_grad for parameter in transfer_model.parameters()):
+            raise ValueError("FreezeStrategy cannot freeze every remaining trainable parameter.")
 
         return transfer_model
 
