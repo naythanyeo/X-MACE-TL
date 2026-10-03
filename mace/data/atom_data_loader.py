@@ -72,6 +72,7 @@ class AtomDataMetadata:
     atomic_numbers: List[int] = field(init=False)
     num_elements: int = field(init=False)
     num_heads: int = field(init=False)
+    nac_num: int = field(init=False)
 
     def __post_init__(self) -> None:
         """
@@ -80,6 +81,7 @@ class AtomDataMetadata:
         self.atomic_numbers = [int(z) for z in self.z_table.zs]
         self.num_elements = len(self.atomic_numbers)
         self.num_heads = len(self.head_to_index)
+        self.nac_num = self.n_energies * (self.n_energies - 1) // 2
 
 
 @dataclass

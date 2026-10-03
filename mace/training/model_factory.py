@@ -135,7 +135,6 @@ def initialise_autoencoder(
     metadata: AtomDataMetadata,
     preset: str = "default_ani",
     compute_nacs: bool = False,
-    nac_num: int = 0,
     latent_dim: Optional[int] = None,
     num_bessel: Optional[int] = None,
     num_polynomial_cutoff: Optional[int] = None,
@@ -154,6 +153,7 @@ def initialise_autoencoder(
     load_base: Optional[str] = None,
     energy_decoder: str = "matrix"
 ) -> modules.AutoencoderExcitedMACE:
+    """The NAC pair count comes from metadata; compute_nacs controls whether NAC prediction is enabled."""
     # Verify that preset selected is available 
     # Currently only default or lightweight
     if preset not in AUTOENCODER_PRESETS:
@@ -199,7 +199,7 @@ def initialise_autoencoder(
         compute_nacs=compute_nacs,
         compute_socs=False,
         soc_num=0,
-        nac_num=nac_num,
+        nac_num=metadata.nac_num if compute_nacs else 0,
         max_ell=settings["max_ell"],
         interaction_cls=modules.interaction_classes[settings["interaction"]],
         interaction_cls_first=modules.interaction_classes[
