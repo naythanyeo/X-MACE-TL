@@ -8,6 +8,8 @@ with the implemented strategies. Eg frozen layers etc
 from copy import deepcopy
 from dataclasses import dataclass
 from fnmatch import fnmatchcase
+import math
+from numbers import Real
 from typing import Dict, Tuple, Optional
 
 import torch
@@ -209,16 +211,36 @@ class LoRAStrategy:
     alpha: float = 1.0
     lora_layers: Tuple[str, ...] = ()
 
+    def __post_init__(self) -> None:
+        # Validate rank
+        if isinstance(self.rank, bool) or not isinstance(self.rank, int):
+            raise TypeError("rank must be an integer.")
+        if self.rank <= 0:
+            raise ValueError("rank must be greater than zero.")
+
+        # Validate alpha
+        if isinstance(self.alpha, bool) or not isinstance(self.alpha, Real):
+            raise TypeError("alpha must be a real number.")
+        if not math.isfinite(self.alpha) or self.alpha <= 0:
+            raise ValueError("alpha must be finite and greater than zero.")
+
+        # Validate lora_layers format
+        if not isinstance(self.lora_layers, (tuple, list)):
+            raise TypeError("lora_layers must be a tuple or list of layer names.")
+        if not self.lora_layers:
+            raise ValueError("lora_layers must contain at least one layer.")
+        for layer in self.lora_layers:
+            if not isinstance(layer, str):
+                raise TypeError("Each LoRA layer name must be a string.")
+            if not layer:
+                raise ValueError("LoRA layer names must not be empty.")
+
     def apply(self, model: torch.nn.Module) -> torch.nn.Module:
         # First deep copy the original model
         transfer_model = deepcopy(model)
         modules = dict(transfer_model.named_modules())
 
         for layer in self.lora_layers:
-            # Check if the lora layers are empty, reject if so
-            if not layer:
-                raise ValueError("LoRA layer names must not be empty.")
-
             # Check the pre-defined user facing lora layer aliases
             # Preferred input as its simpler terms
             if layer in lora_layer_aliases:
