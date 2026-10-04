@@ -261,36 +261,35 @@ def inject_lora(
     alpha: float = 1.0,
     wrap_equivariant: bool = True,
     wrap_dense: bool = True,
-    _is_root: bool = True,
-) -> None:
-    """Recursively replace eligible linears with LoRA-wrapped versions."""
-    for child_name, child in list(module.named_children()):
-        if isinstance(child, (LoRAO3Linear, LoRADenseLinear, LoRAFCLayer)):
-            continue
-        if wrap_equivariant and isinstance(child, o3.Linear):
-            try:
-                wrapped = LoRAO3Linear(child, rank=rank, alpha=alpha)
-            except ValueError:
-                continue
-            setattr(module, child_name, wrapped)
-        if wrap_dense and isinstance(child, nn.Linear):
-            wrapped = LoRADenseLinear(child, rank=rank, alpha=alpha)
-            setattr(module, child_name, wrapped)
-            continue
-        if wrap_dense and isinstance(child, E3NNFCLayer):
-            wrapped = LoRAFCLayer(child, rank=rank, alpha=alpha)
-            setattr(module, child_name, wrapped)
-            continue
-        inject_lora(child, rank, alpha, wrap_equivariant, wrap_dense, _is_root=False)
+) -> nn.Module:
+    """Return an adapted module; containers are updated in place, linears replaced.
 
-    if _is_root:
-        for name, p in module.named_parameters():
-            p.requires_grad = ("lora_A" in name) or ("lora_B" in name)
+    Callers must use the return value and configure base parameter freezing.
+    """
+
+    # First check if the module is already a LORA layer, if so then return 
+    if isinstance(module, (LoRAO3Linear, LoRADenseLinear, LoRAFCLayer)):
+        return module
+    
+    # If the module is a layer that can be wrapped, wrap it and return directly 
+    if wrap_equivariant and isinstance(module, o3.Linear):
+        return LoRAO3Linear(module, rank=rank, alpha=alpha)
+    if wrap_dense and isinstance(module, nn.Linear):
+        return LoRADenseLinear(module, rank=rank, alpha=alpha)
+    if wrap_dense and isinstance(module, E3NNFCLayer):
+        return LoRAFCLayer(module, rank=rank, alpha=alpha)
+
+    # If not, recursively check its children and replace them if needed
+    for name, child in list(module.named_children()):
+        replacement = inject_lora(child, rank, alpha, wrap_equivariant, wrap_dense)
+        setattr(module, name, replacement)
+
+    return module
 
 
-def inject_LoRAs(model: nn.Module, rank: int = 4, alpha: int = 1):
-    inject_lora(model, rank=rank, alpha=alpha, wrap_equivariant=True, wrap_dense=True)
-    return model
+def inject_LoRAs(model: nn.Module, rank: int = 4, alpha: float = 1.0):
+    """Return the adapted model; callers control base parameter freezing."""
+    return inject_lora(model, rank=rank, alpha=alpha)
 
 
 def has_lora_layers(model: nn.Module) -> bool:
@@ -322,8 +321,9 @@ def merge_lora_weights(model: nn.Module, inplace: bool = True) -> nn.Module:
         inplace: If True, modifies the model in place. If False, works on a deep copy.
 
     Returns:
-        Model with LoRA weights merged into base layers. All parameters will have
-        requires_grad=True after merging.
+        Model with adapters removed and weights merged into base layers.
+        Retained parameters preserve their requires_grad flags; bases frozen by
+        LoRAStrategy remain frozen.
     """
     if not inplace:
         import copy
@@ -338,8 +338,5 @@ def merge_lora_weights(model: nn.Module, inplace: bool = True) -> nn.Module:
                 merge_recursive(child)
 
     merge_recursive(model)
-
-    for param in model.parameters():
-        param.requires_grad = True
 
     return model
