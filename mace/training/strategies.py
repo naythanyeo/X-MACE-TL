@@ -6,11 +6,11 @@ with the implemented strategies. Eg frozen layers etc
 """
 
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from fnmatch import fnmatchcase
 import math
 from numbers import Real
-from typing import Dict, Tuple, Optional
+from typing import Dict, List, Tuple, Union, Optional
 
 import torch
 from e3nn import o3
@@ -128,14 +128,14 @@ class NaiveStrategy:
 @dataclass
 class FreezeStrategy:
     """
-    Basic freezing strategy for the model to freeze certain layers
+    Freeze selected parameters; shared graph modules are frozen by default.
     """
 
-    frozen_layers: Tuple[str, ...] = ()
+    frozen_layers: Union[List[str], Tuple[str, ...]] = field(default_factory=lambda: ["full_graph"])
 
     def __post_init__(self) -> None:
-        if not isinstance(self.frozen_layers, tuple):
-            raise TypeError("frozen_layers must be a tuple of layer names.")
+        if not isinstance(self.frozen_layers, (list, tuple)):
+            raise TypeError("frozen_layers must be a list or tuple of layer names.")
         if not all(isinstance(layer, str) and layer for layer in self.frozen_layers):
             raise TypeError("Each frozen layer must be a non-empty string.")
         if len(self.frozen_layers) != len(set(self.frozen_layers)):
@@ -209,7 +209,7 @@ class LoRAStrategy:
 
     rank: int = 4
     alpha: float = 1.0
-    lora_layers: Tuple[str, ...] = ()
+    lora_layers: Union[List[str], Tuple[str, ...]] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         # Validate rank
