@@ -49,3 +49,5 @@ matplotlib_cache/
 nicer_tutorials/_outputs/
 nicer_tutorials/**/trial_run_output/
 nicer_tutorials/**/transfer_learning_output/
+
+.vscode/
